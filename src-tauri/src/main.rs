@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ai;
 mod commands;
 mod doc_generator;
 mod ea;
+mod legacy;
 mod project;
 mod python_runtime;
 mod runtime;
@@ -35,6 +37,7 @@ fn main() {
             let runtime = runtime::Runtime::open(&directory.join("runtime.sqlite3"))
                 .map_err(std::io::Error::other)?;
             app.manage(runtime);
+            app.manage(ai::Ai::new(&directory));
             Ok(())
         })
         .plugin(tauri_plugin_shell::init())
@@ -49,6 +52,7 @@ fn main() {
             project::load_project,
             project::list_project_history,
             project::load_project_revision,
+            legacy::import_legacy_project,
             runtime::open_edit_session,
             runtime::apply_project_edit,
             runtime::create_generation_job,
@@ -59,7 +63,18 @@ fn main() {
             runtime::accept_generation_job,
             runtime::recover_generation_job,
             renderer::render_local_diagram,
+            ai::settings::ai_status,
+            ai::settings::ai_configure,
+            ai::settings::ai_set_key,
+            ai::settings::ai_ollama_models,
+            ai::settings::ai_test_provider,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            // Providers are also in a kill-on-close job; this stops them before the window is gone.
+            if let tauri::RunEvent::Exit = event {
+                app.state::<ai::Ai>().cancel_all();
+            }
+        });
 }

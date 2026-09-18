@@ -1,5 +1,10 @@
 # Local AI configuration (E0)
 
+> This page covers the **Python engine** behind the Docs / Diagram / Auto modes only. Reworking
+> selected blocks uses a separate provider layer with its own settings dialog (Ollama, OpenAI,
+> Gemini, Anthropic, Claude/Codex/Gemini CLI): see [AI-REWORK.md](AI-REWORK.md). The variables
+> below do not affect Rework, and the AI settings dialog does not affect Docs / Diagram.
+
 The Python engine uses local Ollama only. Importing `agent` no longer lists models,
 generates a test prompt, selects another model, or sets a global DSPy LM.
 The bundled LiteLLM price metadata is selected before importing DSPy, avoiding its

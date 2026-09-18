@@ -2,7 +2,18 @@ import type { Project, ProjectDocument, Section } from "./project";
 
 export type GenerationRequest =
   | { kind: "documentation"; description: string; template: string; language: string }
-  | { kind: "diagram"; description: string; diagramType: string; language: string; sectionId: string | null; diagramId: string | null };
+  | { kind: "diagram"; description: string; diagramType: string; language: string; sectionId: string | null; diagramId: string | null }
+  | {
+      kind: "rework";
+      instruction: string;
+      language: string;
+      scope: "selection" | "document";
+      sectionIds: string[];
+      diagramIds: string[];
+      includeContext: boolean;
+      provider: string;
+      model: string;
+    };
 
 export interface GenerationJob {
   id: string;
@@ -12,6 +23,7 @@ export interface GenerationJob {
   request: GenerationRequest;
   status: "queued" | "running" | "ready" | "failed" | "interrupted" | "cancelled" | "accepted" | "recovered" | "discarded";
   sections: Section[] | null;
+  summary: string | null;
   error: string | null;
   createdAt: string;
 }

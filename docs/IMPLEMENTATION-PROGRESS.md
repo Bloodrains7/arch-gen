@@ -79,12 +79,42 @@ Implementované 2026-09-06:
 - Skutočný release executable prešiel `--offline-runtime-check` s minimálnym PATH a neplatným PYTHONHOME/PYTHONPATH: načítaná vlastná DLL, DSPy/LangGraph/native moduly, validná dependency closure a lokálny render. Inference je v teste mockovaná; nejde o živú Ollama skúšku ani čistý Windows VM.
 - Overenie: 20 Rust, 11 Python provider a 3 packaging testy; offline rebuild aj release smoke prešli. Balík: `portable-builds/archgen-win-x64-he8r3esf/` (~391,5 MB). Recept a otvorené release podmienky: [RUNTIME-DISTRIBUTION.md](RUNTIME-DISTRIBUTION.md).
 
+## E0, šiesty prírastok — projekt ako priečinok v Gite
+
+Implementované 2026-09-18. Nahrádza ukladanie projektu z prvého a druhého prírastku (SQLite súbor `.archgen` a tabuľka checkpointov).
+
+- Projekt je priečinok: `archgen.json`, `documents/<dokument>/document.json`, sekcie ako `.md` a diagramy ako `.puml`/`.mmd`. Popis a pravidlá: [PROJECT-FORMAT.md](PROJECT-FORMAT.md).
+- Revízie a aktívny tab sa na disk nezapisujú. Uloženie prepíše iba zmenené súbory, maže iba súbory z predchádzajúceho manifestu a neprepíše cudzí súbor. Súbežnú zmenu (git pull, iný editor) zachytí odtlačok obsahu; uloženie sa vtedy odmietne.
+- Revízie posledného známeho obsahu drží lokálny register. Rovnaký obsah po reštarte pokračuje v revíziách, takže hotový AI návrh zostáva prijateľný; obsah zmenený mimo ArchGen posunie všetky dokumenty za doteraz videné revízie.
+- Saved history je Git history: commity priečinka projektu, náhľad a Restore bez checkoutu. ArchGen necommituje.
+- Import .archgen číta posledný checkpoint starého formátu; starý súbor nemení.
+- Overenie: 25 Rust testov (reálny súborový systém a reálny Git repozitár vrátane CRLF checkoutu a projektu v podpriečinku repozitára), 14 JS, 17 UI testov s mockovaným IPC. Natívny dialóg výberu priečinka a desktopový tok neboli overené.
+
+## E1, prvý prírastok — AI prepracovanie označených blokov s voliteľným providerom
+
+Implementované 2026-09-18. Používateľský popis: [AI-REWORK.md](AI-REWORK.md); návrh, kontrakt a rozhodnutia z review: [AI-REWORK-DESIGN.md](AI-REWORK-DESIGN.md).
+
+- V canvase sa zaškrtávajú sekcie a diagramy; režim Rework pošle inštrukciu a iba označené bloky zvolenému providerovi. Výsledok je bežný návrh (Review changes → Accept / Recover / Discard). Zlučovanie v Ruste (`ai/rework.rs`) nedovolí zmeniť nič mimo označenia; neoznačené bloky zostávajú bajt po bajte rovnaké.
+- Provideri v Ruste bez nových crate-ov (`src-tauri/src/ai/`): lokálna Ollama, OpenAI, Gemini API a Anthropic cez systémový `curl.exe` (konfigurácia aj telo iba na stdin), Claude/Codex/Gemini CLI v headless režime s vypnutými nástrojmi v prázdnom priečinku. Bezpečnostné prepínače CLI sú povinné; verzia, ktorá ich nepozná, sa odmietne vetou.
+- Rozsah je na drôte explicitný (`scope: selection | document`). Celý dokument sa posiela iba po vedomom kliknutí na Rework bez označenia, platí pre jeden dokument a jednu požiadavku. Prázdny výber nikdy neznamená celý dokument.
+- Súhlas: veta „Sends … to {príjemca} via {provider}" pred odoslaním; úloha beží s providerom a modelom zaznamenanými pri vytvorení, inak zlyhá.
+- Kľúče: prostredie alebo DPAPI v `ai-settings.json` v app-data (mimo Gitu); nikdy v IPC, argumentoch, súboroch ani chybách. Spúšťané procesy kľúče z prostredia nededia, CLI teda používa vlastné prihlásenie.
+- Procesy providerov bežia vo Windows Job Objecte: Cancel, timeout aj zavretie aplikácie ukončia celý strom. Zrušenie Rework úlohy preto výpočet naozaj zastaví; zrušenie Docs/Diagram (Python) zostáva iba logické.
+- Gemini CLI ukladá prompty na disk (aj pri chybe API do dočasného priečinka); ArchGen mu dáva vlastný dočasný priečinok a stopy maže po každej požiadavke aj pri štarte.
+- Dialóg AI settings: provider, model (pre Ollamu zoznam nainštalovaných lokálnych modelov), kľúč (iba zápis), Ollama URL (iba loopback), timeout, Test provider.
+
+Postup: návrh → adversariálna kontrola návrhu (40 nálezov zapracovaných pred implementáciou) → implementácia v troch paralelných líniách → kontrola kódu v siedmich dimenziách s nezávislým overením každého nálezu (70 nálezov, 66 potvrdených vrátane 4 kritických: tichý prechod na celý dokument pri vyprázdnenom výbere, prompty Gemini CLI v `%TEMP%`) → opravy s druhou kontrolou.
+
+Overenie: 215 Rust testov (vrátane reálneho `curl.exe` proti lokálnemu listeneru a reálnych procesov vo Windows Job Objecte), 39 JS, 50 UI testov s mockovaným IPC; typová kontrola bez chýb (5 existujúcich CSS warnings), frontend build prešiel. **Naživo v skutočnej desktopovej aplikácii cez reálne Tauri IPC** (`scripts/live-rework.mjs`, `scripts/live-scope.mjs`): Ollama `qwen3.8:27b`, Claude CLI a Codex CLI — zmenená presne označená sekcia; prázdny výber nič neodoslal; prepracovanie celého dokumentu nezmazalo žiadnu sekciu. Gemini CLI iba na ceste „neprihlásený" (401 na tomto stroji): správna veta, žiadne stopy v `%TEMP%` ani `~/.gemini`. OpenAI, Gemini API a Anthropic **neboli volané naživo** (bez kľúčov); overené sú iba jednotkovými testmi stavby požiadaviek a parserov. Po opravách prešli znova `scripts/live-scope.mjs` (Ollama), Codex CLI a cesta Gemini v aplikácii a Rust testy `live_claude_cli` a `live_ollama`; Claude CLI v samotnej aplikácii bol naživo spustený iba pred opravami.
+
+Otvorené: Docs/Diagram zatiaľ nepoužívajú zvoleného providera. Druhá inštancia ArchGen označí pri štarte bežiace úlohy prvej ako prerušené (chýba single-instance ochrana). Mock IPC v e2e je ručný obraz validácie v Ruste a môže sa rozísť. Review a Git history modal nevracajú fokus na otvárajúci prvok (AI settings áno).
+
 ## Čo ešte nie je dokončené z E0
 
-Nejde o dokončenie celej etapy. Ukladanie je explicitné, bez autosave a automatického otvorenia posledného projektu. Checkpointy nezachytávajú každú editáciu. Neprijaté AI výsledky zostávajú v lokálnom registri, nie v prenosnom `.archgen` súbore.
+Nejde o dokončenie celej etapy. Ukladanie je explicitné, bez autosave a automatického otvorenia posledného projektu. História sú Git commity, nie každé uloženie. Neprijaté AI výsledky zostávajú v lokálnom registri, nie v priečinku projektu.
 
 ID manuálne vytvorených dokumentov/sekcií vznikajú vo frontendovej doménovej vrstve a Rust ich validuje; ID relácií, úloh a AI výstupov vytvára Rust. Pracovné revízie sú autoritou Rustu. Editácia zatiaľ posiela celý navrhovaný snapshot, nie samostatný typovaný príkaz pre každé pole. ReadSet pokrýva pôvodný dokument (vrátane jazyka a šablóny); externé snapshoty/pravidlá ešte neexistujú.
 
-Zrušenie výpočtu, plná kompatibilita lokálneho rendereru (C4 makrá, Mermaid a ďalšie syntaxe), CSP, podpísaný inštalátor/licenčný audit, kompletné rozhranie schopností/provider schém a oprava placeholder exportov zostávajú otvorené. Čistá inštalácia na Windows ani živé AI generovanie zatiaľ nie sú overené. Vývojový build stále potrebuje nainštalovaný Python, vyberaný cez PATH alebo `PYO3_PYTHON`; portable release má vlastný interpreter.
+Zrušenie výpočtu pre Docs/Diagram (Rework už proces providera ukončuje), plná kompatibilita lokálneho rendereru (C4 makrá, Mermaid a ďalšie syntaxe), CSP, podpísaný inštalátor/licenčný audit, kompletné rozhranie schopností/provider schém a oprava placeholder exportov zostávajú otvorené. Čistá inštalácia na Windows ani živé generovanie Docs/Diagram cez Python engine zatiaľ nie sú overené (Rework je overený naživo, pozri E1). Vývojový build stále potrebuje nainštalovaný Python, vyberaný cez PATH alebo `PYO3_PYTHON`; portable release má vlastný interpreter.
 
 Ďalší odporúčaný krok: čistý Windows smoke test a živá Ollama skúška; následne základ zdrojových snapshotov pred importom repozitára/UI/DB.

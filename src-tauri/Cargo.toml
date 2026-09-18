@@ -18,7 +18,11 @@ tokio = { version = "1.0", features = ["full"] }
 pyo3 = { version = "0.25", features = ["auto-initialize"] }
 
 # Windows COM Integration (Visio / EA)
-windows = { version = "0.52", features = ["Win32_System_Com", "Win32_System_Ole", "Win32_Foundation"] }
+windows = { version = "0.52", features = [
+    "Win32_System_Com", "Win32_System_Ole", "Win32_Foundation",
+    # AI providers: DPAPI for stored API keys, Job Objects so a provider's whole process tree stops with its request
+    "Win32_Security", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_Threading",
+] }
 
 # Data handling
 serde = { version = "1.0", features = ["derive"] }

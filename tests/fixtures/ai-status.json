@@ -1,0 +1,98 @@
+{
+  "provider": "ollama",
+  "ollamaUrl": "http://localhost:11434",
+  "timeoutSeconds": 600,
+  "providers": [
+    {
+      "id": "ollama",
+      "label": "Ollama (local)",
+      "local": true,
+      "cli": false,
+      "recipient": "this computer",
+      "model": "qwen3.8:27b",
+      "defaultModel": "",
+      "available": true,
+      "detail": "Uses qwen3.8:27b on this computer.",
+      "keySource": "not_needed",
+      "notice": ""
+    },
+    {
+      "id": "openai",
+      "label": "OpenAI API",
+      "local": false,
+      "cli": false,
+      "recipient": "OpenAI",
+      "model": "gpt-5.6",
+      "defaultModel": "gpt-5.6",
+      "available": false,
+      "detail": "Set an OpenAI API key in AI settings or start ArchGen with OPENAI_API_KEY.",
+      "keySource": "none",
+      "notice": ""
+    },
+    {
+      "id": "gemini",
+      "label": "Gemini API",
+      "local": false,
+      "cli": false,
+      "recipient": "Google",
+      "model": "gemini-3.8-flash",
+      "defaultModel": "gemini-3.8-flash",
+      "available": false,
+      "detail": "Set a Gemini API key in AI settings or start ArchGen with GEMINI_API_KEY.",
+      "keySource": "none",
+      "notice": ""
+    },
+    {
+      "id": "anthropic",
+      "label": "Claude API",
+      "local": false,
+      "cli": false,
+      "recipient": "Anthropic",
+      "model": "claude-opus-5",
+      "defaultModel": "claude-opus-5",
+      "available": true,
+      "detail": "Uses claude-opus-5 with the key from ANTHROPIC_API_KEY.",
+      "keySource": "env",
+      "notice": ""
+    },
+    {
+      "id": "claude_cli",
+      "label": "Claude CLI",
+      "local": false,
+      "cli": true,
+      "recipient": "Anthropic",
+      "model": "",
+      "defaultModel": "",
+      "available": true,
+      "detail": "Uses the Claude Code login on this computer.",
+      "keySource": "not_needed",
+      "notice": ""
+    },
+    {
+      "id": "codex_cli",
+      "label": "Codex CLI",
+      "local": false,
+      "cli": true,
+      "recipient": "OpenAI",
+      "model": "",
+      "defaultModel": "",
+      "available": true,
+      "detail": "Uses the Codex login on this computer.",
+      "keySource": "not_needed",
+      "notice": ""
+    },
+    {
+      "id": "gemini_cli",
+      "label": "Gemini CLI",
+      "local": false,
+      "cli": true,
+      "recipient": "Google",
+      "model": "",
+      "defaultModel": "",
+      "available": false,
+      "detail": "Gemini CLI is not installed or not on PATH.",
+      "keySource": "not_needed",
+      "notice": ""
+    }
+  ]
+}

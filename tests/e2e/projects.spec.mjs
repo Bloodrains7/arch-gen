@@ -1,127 +1,12 @@
 import { test, expect } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { installIpcMock } from "./ipc-mock.mjs";
+
+const aiStatus = JSON.parse(readFileSync(new URL("../fixtures/ai-status.json", import.meta.url), "utf8"));
 
 // UI integration tests mock IPC only. Real SQLite persistence is tested in Rust.
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => {
-    window.isTauri = true;
-    window.calls = [];
-    window.confirmResult = true;
-    const clone = value => JSON.parse(JSON.stringify(value));
-    const sessions = new Map();
-    const jobs = () => JSON.parse(localStorage.getItem("test-generation-jobs") ?? "[]");
-    const putJob = job => {
-      localStorage.setItem("test-generation-jobs", JSON.stringify([job, ...jobs().filter(j => j.id !== job.id)]));
-      return clone(job);
-    };
-    for (const job of jobs()) if (["queued", "running"].includes(job.status)) putJob({ ...job, status: "interrupted" });
-    const edit = (sessionId, expectedRevision, proposed, invalidateDocuments = false) => {
-      const current = sessions.get(sessionId);
-      if (current.revision !== expectedRevision) throw new Error("Revision conflict");
-      const next = clone(proposed);
-      next.revision = current.revision;
-      for (const doc of next.documents) doc.revision = current.documents.find(d => d.id === doc.id)?.revision ?? 0;
-      if (JSON.stringify(next) === JSON.stringify(current) && !invalidateDocuments) return clone(current);
-      next.revision++;
-      for (const doc of next.documents) {
-        const old = current.documents.find(d => d.id === doc.id);
-        if (invalidateDocuments) doc.revision = next.revision;
-        else if (old && JSON.stringify(old) !== JSON.stringify(doc)) doc.revision++;
-      }
-      sessions.set(sessionId, clone(next));
-      return next;
-    };
-    window.__TAURI_INTERNALS__ = {
-      metadata: { currentWindow: { label: "main" } },
-      transformCallback: () => 1,
-      invoke: async (command, args) => {
-        window.calls.push({ command, args });
-        if (command === "render_local_diagram") {
-          if (window.renderFailure) throw new Error("Local renderer is not installed. No data was sent remotely.");
-          if (window.deferRender) return new Promise(resolve => { window.resolveRender = resolve; });
-          return '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="80"><script>window.injected=true</script><image href="https://example.invalid/leak"/><foreignObject><div>Unsafe</div></foreignObject><rect width="200" height="80" fill="url(https://example.invalid/fill)"/><text x="10" y="30">Local preview</text></svg>';
-        }
-        if (command.startsWith("plugin:event|")) return 1;
-        if (command === "open_edit_session") {
-          const sessionId = crypto.randomUUID();
-          sessions.set(sessionId, clone(args.project));
-          return { sessionId, project: clone(args.project) };
-        }
-        if (command === "apply_project_edit") {
-          if (window.failNextEdit) { window.failNextEdit = false; throw new Error("Simulated journal failure"); }
-          return edit(args.sessionId, args.expectedRevision, args.proposed, args.invalidateDocuments);
-        }
-        if (command === "list_generation_jobs") return jobs().filter(j => j.projectId === args.projectId);
-        if (command === "create_generation_job") {
-          const project = sessions.get(args.sessionId);
-          const doc = project.documents.find(d => d.id === args.documentId);
-          if (doc.revision !== args.expectedDocumentRevision) throw new Error("Document revision conflict");
-          return putJob({ id: crypto.randomUUID(), projectId: project.id, documentId: doc.id,
-            baseDocument: clone(doc), request: clone(args.request), status: "queued", sections: null,
-            error: null, createdAt: "2026-09-05 12:00:00" });
-        }
-        if (command === "run_generation_job") {
-          const job = jobs().find(j => j.id === args.jobId);
-          putJob({ ...job, status: "running" });
-          return new Promise(resolve => { window.resolveGeneration = raw => {
-            const latest = jobs().find(j => j.id === args.jobId);
-            if (latest.status !== "running") { resolve(latest); return; }
-            let sections;
-            if (job.request.kind === "documentation") {
-              sections = raw.sections.map(s => ({ ...s, id: crypto.randomUUID(),
-                diagrams: s.diagrams.map(g => ({ ...g, id: crypto.randomUUID() })) }));
-            } else {
-              sections = clone(job.baseDocument.sections);
-              let section = sections.find(s => s.id === job.request.sectionId);
-              if (!section) { section = { id: crypto.randomUUID(), title: "Diagram", content: "", diagrams: [] }; sections.push(section); }
-              const existing = section.diagrams.findIndex(g => g.id === job.request.diagramId);
-              const diagram = { ...raw, id: job.request.diagramId ?? crypto.randomUUID() };
-              if (existing < 0) section.diagrams.push(diagram); else section.diagrams[existing] = diagram;
-            }
-            resolve(putJob({ ...latest, status: "ready", sections }));
-          }; });
-        }
-        if (command === "cancel_generation_job" || command === "discard_generation_job") {
-          return putJob({ ...jobs().find(j => j.id === args.jobId), status: command === "cancel_generation_job" ? "cancelled" : "discarded" });
-        }
-        if (command === "accept_generation_job" || command === "recover_generation_job") {
-          const job = jobs().find(j => j.id === args.jobId);
-          const project = clone(sessions.get(args.sessionId));
-          if (job.status !== "ready" || job.projectId !== project.id) throw new Error("Unavailable result");
-          if (command === "accept_generation_job") {
-            const doc = project.documents.find(d => d.id === job.documentId);
-            if (JSON.stringify(doc) !== JSON.stringify(job.baseDocument)) throw new Error("Stale result");
-            doc.sections = clone(job.sections);
-          } else {
-            const doc = { ...clone(job.baseDocument), id: crypto.randomUUID(), name: `${job.baseDocument.name} (recovered)`, revision: 0,
-              sections: job.sections.map(s => ({ ...clone(s), id: crypto.randomUUID(), diagrams: s.diagrams.map(g => ({ ...g, id: crypto.randomUUID() })) })) };
-            project.documents.push(doc); project.activeDocumentId = doc.id;
-          }
-          const result = edit(args.sessionId, args.expectedRevision, project);
-          putJob({ ...job, status: command === "accept_generation_job" ? "accepted" : "recovered" });
-          return result;
-        }
-        if (command === "plugin:dialog|confirm") return window.confirmResult;
-        if (command === "plugin:dialog|save" || command === "plugin:dialog|open") return "fixture.archgen";
-        if (command === "save_project") {
-          localStorage.setItem("test-saved-project", JSON.stringify(args.project));
-          const history = JSON.parse(localStorage.getItem("test-project-history") ?? "[]");
-          if (!history.some(p => p.id === args.project.id && p.revision === args.project.revision)) history.push(args.project);
-          localStorage.setItem("test-project-history", JSON.stringify(history));
-          return;
-        }
-        if (command === "list_project_history") {
-          return JSON.parse(localStorage.getItem("test-project-history") ?? "[]").filter(p => p.id === args.projectId && (args.beforeRevision == null || p.revision < args.beforeRevision))
-            .sort((a, b) => b.revision - a.revision).slice(0, 50).map(p => ({ revision: p.revision, savedAt: "2026-09-05 12:00:00" }));
-        }
-        if (command === "load_project_revision") {
-          return JSON.parse(localStorage.getItem("test-project-history") ?? "[]").find(p => p.id === args.projectId && p.revision === args.revision);
-        }
-        if (command === "load_project") return window.loadFixture ?? JSON.parse(localStorage.getItem("test-saved-project"));
-        if (command === "get_template") return ["Overview", "Data model"];
-        throw new Error(`Unexpected IPC: ${command}`);
-      },
-    };
-  });
+  await page.addInitScript(installIpcMock, { aiStatus });
   await page.goto("/");
 });
 
@@ -181,7 +66,7 @@ test("local render failure never falls back to public renderer", async ({ page }
 
 test("ready generation survives reload and reopening its saved project", async ({ page }) => {
   await page.getByRole("button", { name: "Save project", exact: true }).click();
-  await expect(page.getByRole("status")).toContainText("Saved fixture.archgen");
+  await expect(page.getByRole("status")).toContainText("Saved fixture-project");
   await startGeneration(page);
   await finishGeneration(page);
   await expect(page.getByRole("button", { name: "Review changes", exact: true })).toBeVisible();
@@ -210,7 +95,7 @@ test("journal failure preserves visible edits and retry enables saving", async (
   await expect(page.getByLabel("Project name")).toHaveValue("Preserved after failure");
   await page.getByRole("button", { name: "Retry synchronization" }).click();
   await page.getByRole("button", { name: "Save project", exact: true }).click();
-  await expect(page.getByRole("status")).toContainText("Saved fixture.archgen");
+  await expect(page.getByRole("status")).toContainText("Saved fixture-project");
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem("test-saved-project")).name)).toBe("Preserved after failure");
 });
 
@@ -219,7 +104,7 @@ test("save and reopen restores names, all documents and content", async ({ page 
   await page.getByRole("button", { name: "Custom Your own template structure" }).click();
   await page.getByTitle("New document").click();
   await page.getByRole("button", { name: "Save project", exact: true }).click();
-  await expect(page.getByRole("status")).toContainText("Saved fixture.archgen");
+  await expect(page.getByRole("status")).toContainText("Saved fixture-project");
   await page.reload();
   await page.getByRole("button", { name: "Open project", exact: true }).click();
   await expect(page.getByLabel("Project name")).toHaveValue("Billing architecture");
@@ -305,7 +190,7 @@ test("diagram update targets only the selected diagram and preserves its ID", as
   await acceptChanges(page);
   await expect(page.getByRole("status")).toContainText("Updated Design");
   await page.getByRole("button", { name: "Save project", exact: true }).click();
-  await expect(page.getByRole("status")).toContainText("Saved fixture.archgen");
+  await expect(page.getByRole("status")).toContainText("Saved fixture-project");
   const diagrams = await page.evaluate(() => JSON.parse(localStorage.getItem("test-saved-project")).documents[0].sections[0].diagrams);
   expect(diagrams[0].content).toContain("class Keep");
   expect(diagrams[1].id).toBe("second");
@@ -351,19 +236,18 @@ test("manual section edits undo and redo without losing document identity", asyn
   await expect(page.locator("h2.section-title")).toHaveText("Edited title");
 });
 
-test("saved history survives reload, restoration keeps newer versions and is undoable", async ({ page }) => {
+test("git history survives reload, restoration keeps newer versions and is undoable", async ({ page }) => {
   await page.getByLabel("Project name").fill("Original name");
   await page.getByRole("button", { name: "Save project", exact: true }).click();
-  await expect(page.getByRole("status")).toContainText("Saved fixture.archgen");
-  const originalRevision = await page.evaluate(() => JSON.parse(localStorage.getItem("test-saved-project")).revision);
+  await expect(page.getByRole("status")).toContainText("Saved fixture-project");
   await page.getByLabel("Project name").fill("New name");
   await page.getByRole("button", { name: "Save project", exact: true }).click();
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("test-saved-project")).name)).toBe("New name");
   await page.reload();
   await page.getByRole("button", { name: "Open project", exact: true }).click();
   await expect(page.getByLabel("Project name")).toHaveValue("New name");
-  await page.getByRole("button", { name: "Saved history", exact: true }).click();
-  await page.getByRole("button", { name: new RegExp(`^Revision ${originalRevision} ·`) }).click();
+  await page.getByRole("button", { name: "Git history", exact: true }).click();
+  await page.getByRole("button", { name: /Save Original name$/ }).click();
   await page.getByRole("button", { name: "Restore this version", exact: true }).click();
   await expect(page.getByLabel("Project name")).toHaveValue("Original name");
   await page.getByRole("button", { name: "Undo", exact: true }).click();
@@ -374,4 +258,35 @@ test("saved history survives reload, restoration keeps newer versions and is und
   const history = await page.evaluate(() => JSON.parse(localStorage.getItem("test-project-history")));
   expect(history.map(p => p.name)).toEqual(["Original name", "New name", "Original name"]);
   expect(history[2].revision).toBeGreaterThan(history[1].revision);
+});
+
+test("a save over content changed outside ArchGen is refused and keeps the edits", async ({ page }) => {
+  await page.getByLabel("Project name").fill("Mine");
+  await page.getByRole("button", { name: "Save project", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("Saved fixture-project");
+  await page.evaluate(() => {
+    const pulled = JSON.parse(localStorage.getItem("test-saved-project"));
+    localStorage.setItem("test-saved-project", JSON.stringify({ ...pulled, name: "Changed by git pull" }));
+  });
+  await page.getByLabel("Project name").fill("Mine, edited");
+  await page.getByRole("button", { name: "Save project", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("Save failed");
+  await expect(page.getByLabel("Project name")).toHaveValue("Mine, edited");
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("test-saved-project")).name)).toBe("Changed by git pull");
+});
+
+test("a former .archgen file imports as an unsaved project that saves into a folder", async ({ page }) => {
+  await page.evaluate(() => {
+    window.confirmResult = true;
+    window.loadFixture = { schemaVersion: 1, id: "legacy", name: "From SQLite", revision: 4, activeDocumentId: "d", documents: [
+      { id: "d", name: "Old doc", revision: 2, template: "custom", language: "en", sections: [{ id: "s", title: "Kept", content: "Text", diagrams: [] }] }] };
+  });
+  await page.getByRole("button", { name: "Import .archgen", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("Imported legacy.archgen");
+  await expect(page.getByLabel("Project name")).toHaveValue("From SQLite");
+  await expect(page.getByText("Unsaved changes")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Git history", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Save project", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("Saved fixture-project");
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("test-saved-project")).name)).toBe("From SQLite");
 });

@@ -5,18 +5,25 @@
   import Toolbar from "./lib/components/Toolbar.svelte";
   import Modal from "./lib/components/Modal.svelte";
   import ChangePreview from "./lib/components/ChangePreview.svelte";
-  import { onMount } from "svelte";
+  import AiSettings from "./lib/components/AiSettings.svelte";
+  import { onMount, tick } from "svelte";
   import { invoke, isTauri } from "@tauri-apps/api/core";
-  import { open, save, confirm } from "@tauri-apps/plugin-dialog";
+  import { open, confirm } from "@tauri-apps/plugin-dialog";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { createProject, createDocument, updateDocument, captureTarget, applyGeneratedSections, parseProject, emptyHistory, recordChange, moveHistory, restoreSnapshot, sectionSource } from "./lib/project";
-  import type { Project, Section } from "./lib/project";
+  import type { Project, ProjectDocument, Section } from "./lib/project";
   import { EditSession, jobCompatible } from "./lib/runtime";
   import type { GenerationJob, GenerationRequest } from "./lib/runtime";
+  import { fetchAiStatus } from "./lib/ai";
+  import type { AiStatus } from "./lib/ai";
+  import { emptySelection, pruneSelection, toggleSection, toggleDiagram } from "./lib/selection";
+  import type { BlockSelection } from "./lib/selection";
 
   let project = $state(createProject());
   let projectPath = $state<string | null>(null);
   let savedRevision = $state(0);
+  // Identifies the on-disk content of the last load or save; a save over anything else is refused.
+  let savedFingerprint = $state<string | null>(null);
   let fileBusy = $state(false);
   let status = $state("");
   let session = $state(0);
@@ -33,7 +40,7 @@
   let pending = $derived(jobList.filter(j => j.status === "ready" && j.sections).map(j => ({
     id: j.id, target: { projectId: j.projectId, documentId: j.documentId, revision: j.baseDocument.revision,
       template: j.baseDocument.template, language: j.baseDocument.language, name: j.baseDocument.name },
-    before: j.baseDocument.sections, sections: j.sections!,
+    before: j.baseDocument.sections, sections: j.sections!, baseDocument: j.baseDocument, request: j.request, summary: j.summary,
   })));
   let reviewingId = $state<string | null>(null);
   let reviewing = $derived(pending.find(item => item.id === reviewingId));
@@ -42,7 +49,7 @@
   let historyOpen = $state(false);
   let historyLoading = $state(false);
   let historyError = $state("");
-  let historyEntries = $state<{ revision: number; savedAt: string }[]>([]);
+  let historyEntries = $state<HistoryEntry[]>([]);
   let historyMore = $state(false);
   let historySnapshot = $state<Project | null>(null);
   let historyBaseRevision = $state(0);
@@ -50,8 +57,63 @@
   let tabs = $derived(project.documents);
   let activeTabId = $derived(project.activeDocumentId);
   let activeTab = $derived(tabs.find(t => t.id === activeTabId)!);
+  type HistoryEntry = { commit: string; savedAt: string; summary: string };
+  let historyCommit = $state<HistoryEntry | null>(null);
   let dirty = $derived(project.revision !== savedRevision);
   let isGenerating = $state(false);
+  let aiStatus = $state<AiStatus | null>(null);
+  let aiStatusError = $state("");
+  let aiSettingsOpen = $state(false);
+  // The element to return focus to once the dialog's `{#if}` block has actually
+  // left the DOM — captured at open time, since by then it is always the "AI
+  // settings" button that has focus (settings-dialog-and-e2e-quality#11).
+  let aiSettingsOpener = $state<HTMLElement | null>(null);
+  // Tagged with the session and document it was made in, so switching tabs, undo/redo,
+  // accepted AI results, Git restore and open/new/import all fall back to empty instead
+  // of carrying a stale selection into another document. `selection` also drops any ID
+  // that no longer exists in the active tab (e.g. a section just removed).
+  // `includeContext` lives on the same tagged object (design doc §9): it carries over
+  // while the user keeps ticking within one document, but never into another one.
+  let rawSelection = $state<BlockSelection & { session: number; documentId: string; includeContext: boolean }>(
+    { session: -1, documentId: "", sectionIds: [], diagramIds: [], includeContext: false },
+  );
+  let selectionMatch = $derived(rawSelection.session === session && rawSelection.documentId === activeTabId);
+  let selection = $derived(selectionMatch ? pruneSelection(rawSelection, activeTab.sections) : emptySelection());
+  let includeContext = $derived(selectionMatch ? rawSelection.includeContext : false);
+  // Whole-document rework is armed only by a Rework click with nothing ticked
+  // (design doc §9); tagged the same way, so it drops by itself on a tab switch
+  // or session change, and is dropped explicitly by every toggle, "Clear
+  // selection", and a created rework request (see the functions below).
+  let documentScope = $state({ session: -1, documentId: "" });
+  let documentScopeArmed = $derived(documentScope.session === session && documentScope.documentId === activeTabId);
+
+  function armDocumentScope() {
+    documentScope = { session, documentId: activeTabId };
+  }
+
+  async function refreshAiStatus() {
+    try { aiStatus = await fetchAiStatus(invoke); aiStatusError = ""; }
+    catch (error) { aiStatus = null; aiStatusError = `Could not load AI status: ${error}`; }
+  }
+
+  function toggleSectionSelection(id: string) {
+    documentScope = { session: -1, documentId: "" };
+    rawSelection = { session, documentId: activeTabId, includeContext, ...toggleSection(selection, id) };
+  }
+
+  function toggleDiagramSelection(sectionId: string, diagramId: string) {
+    documentScope = { session: -1, documentId: "" };
+    rawSelection = { session, documentId: activeTabId, includeContext, ...toggleDiagram(selection, sectionId, diagramId) };
+  }
+
+  function clearSelection() {
+    documentScope = { session: -1, documentId: "" };
+    rawSelection = { session, documentId: activeTabId, includeContext: false, ...emptySelection() };
+  }
+
+  function setIncludeContext(value: boolean) {
+    rawSelection = { session, documentId: activeTabId, sectionIds: selection.sectionIds, diagramIds: selection.diagramIds, includeContext: value };
+  }
 
   function queueEdit(next: Project, invalidateDocuments = false) {
     const serial = ++editSerial;
@@ -181,6 +243,26 @@
     finally { resolvingJob = false; }
   }
 
+  // Provider/model come from the job's own `request`, never from the current
+  // `aiStatus`: a rework job always ran with the provider it was created for.
+  function reworkLabel(request: GenerationRequest): string {
+    return request.kind === "rework" ? ` · ${request.provider}${request.model ? ` (${request.model})` : ""}` : "";
+  }
+
+  function reworkTargets(request: GenerationRequest, baseDocument: ProjectDocument): string {
+    if (request.kind !== "rework") return "";
+    if (request.scope === "document") return "the whole document";
+    const sectionTitles = request.sectionIds.map(id => baseDocument.sections.find(s => s.id === id)?.title || "untitled");
+    const diagramTitles = request.diagramIds.map(id => {
+      for (const section of baseDocument.sections) {
+        const diagram = section.diagrams.find(d => d.id === id);
+        if (diagram) return `${diagram.diagram_type} in ${section.title}`;
+      }
+      return id;
+    });
+    return [...sectionTitles, ...diagramTitles].join(", ") || "(no blocks)";
+  }
+
   function upsertJob(job: GenerationJob) {
     if (job.projectId !== project.id) return;
     jobRefresh++;
@@ -205,7 +287,17 @@
       await runtime.flush();
       if (session !== startedSession || !runtimeReady) throw new Error("The project changed before generation started.");
       const job = await invoke<GenerationJob>("create_generation_job", { sessionId: runtime.id, documentId, expectedDocumentRevision, request });
-      if (session === startedSession) upsertJob(job);
+      if (session === startedSession) {
+        upsertJob(job);
+        // A created rework request has spent the whole-document arm and the
+        // context tick (design doc §9): leaving either set would let the next
+        // empty selection, or the next tick, silently reuse a consent the
+        // user already gave for a different request.
+        if (request.kind === "rework") {
+          documentScope = { session: -1, documentId: "" };
+          rawSelection = { ...rawSelection, includeContext: false };
+        }
+      }
       preparingJobs--; preparing = false;
       const running = { ...job, status: "running" as const };
       if (session === startedSession) upsertJob(running);
@@ -217,6 +309,10 @@
       }
     } catch (error) {
       try { await refreshJobs(); } catch { /* Keep the original generation failure. */ }
+      // A rejected rework creation usually means AI settings changed underneath the
+      // request (a different provider configured, a key removed); refresh so the
+      // panel reflects what is actually configured now instead of a stale status.
+      if (request.kind === "rework") await refreshAiStatus();
       throw error;
     } finally { if (preparing) preparingJobs--; }
   }
@@ -257,9 +353,12 @@
       await runtime.flush();
       const fresh = parseProject(await runtime.open(createProject()));
       session++;
-      project = fresh; projectPath = null; savedRevision = 0; jobList = [];
+      project = fresh; projectPath = null; savedRevision = 0; savedFingerprint = null; jobList = [];
+      // A rework still running for the project just left must not leave the new,
+      // unrelated project stuck showing "Generating..." until it settles.
+      isGenerating = false;
       undoHistory = emptyHistory(); reviewingId = null; closeHistory();
-      status = "New project. Use Save project to choose a file.";
+      status = "New project. Use Save project to choose a folder.";
     } catch (error) { status = `Could not create project: ${error}`; }
     finally { fileBusy = false; runtimeReady = !!runtime.id; }
   }
@@ -268,42 +367,52 @@
     if (fileBusy) return;
     fileBusy = true;
     try {
-      const path = saveAs || !projectPath ? await save({ title: "Save ArchGen project (choose a new filename)", defaultPath: "project.archgen", filters: [{ name: "ArchGen project", extensions: ["archgen"] }] }) : projectPath;
-      if (!path) return;
+      const path = saveAs || !projectPath ? await open({ title: "Choose a folder for the ArchGen project (no existing project inside)", directory: true, multiple: false }) : projectPath;
+      if (!path || typeof path !== "string") return;
       const snapshot = parseProject(await runtime.flush());
       undoHistory = { ...undoHistory, group: undefined };
-      const expectedRevision = !saveAs && path === projectPath ? savedRevision : null;
-      await invoke("save_project", { path, project: snapshot, expectedRevision });
+      const expectedFingerprint = !saveAs && path === projectPath ? savedFingerprint : null;
+      savedFingerprint = await invoke<string>("save_project", { path, project: snapshot, expectedFingerprint });
       projectPath = path; savedRevision = snapshot.revision;
       status = `Saved ${path}${project.revision !== snapshot.revision ? " — newer edits still need saving." : ""}`;
     } catch (error) { status = `Save failed: ${error}`; }
     finally { fileBusy = false; }
   }
 
-  async function openProject() {
+  async function openProject(legacy = false) {
     if (fileBusy) return;
     fileBusy = true;
     try {
       if (!(await canLeave())) return;
       const revision = project.revision;
       const pendingCount = pending.length;
-      const path = await open({ title: "Open ArchGen project", multiple: false, filters: [{ name: "ArchGen project", extensions: ["archgen"] }] });
+      const path = legacy
+        ? await open({ title: "Import a former .archgen project file", multiple: false, filters: [{ name: "ArchGen project file", extensions: ["archgen"] }] })
+        : await open({ title: "Open ArchGen project folder", directory: true, multiple: false });
       if (!path || typeof path !== "string") return;
-      const loaded = parseProject(await invoke<unknown>("load_project", { path }));
+      const disk = legacy
+        ? { project: await invoke<unknown>("import_legacy_project", { path }), fingerprint: null }
+        : await invoke<{ project: unknown; fingerprint: string }>("load_project", { path });
+      const loaded = parseProject(disk.project);
       if (project.revision !== revision || pending.length !== pendingCount) throw new Error("The current project changed while opening. Save it and try again.");
       runtimeReady = false;
       await runtime.flush();
       const acknowledged = parseProject(await runtime.open(loaded));
-      session++; project = acknowledged; projectPath = path; savedRevision = loaded.revision; jobList = [];
+      // An imported file is an unsaved project until a folder is chosen for it.
+      session++; project = acknowledged; projectPath = legacy ? null : path; savedRevision = legacy ? -1 : loaded.revision;
+      savedFingerprint = disk.fingerprint; jobList = [];
+      // Same reasoning as `newProject`: the project being left behind may still
+      // have a rework in flight, and that must not block the one just opened.
+      isGenerating = false;
       await refreshJobs();
       undoHistory = emptyHistory(); reviewingId = null; closeHistory();
-      status = `Opened ${path}`;
+      status = legacy ? `Imported ${path}. Use Save project to choose a folder for it.` : `Opened ${path}`;
     } catch (error) { status = `Open failed: ${error}`; }
     finally { fileBusy = false; runtimeReady = !!runtime.id; }
   }
 
   function closeHistory() {
-    historyOpen = false; historyRequest++; historyLoading = false; historySnapshot = null;
+    historyOpen = false; historyRequest++; historyLoading = false; historySnapshot = null; historyCommit = null;
   }
 
   async function loadHistory(more = false) {
@@ -313,8 +422,8 @@
     const startedSession = session;
     if (!more) { historyEntries = []; historySnapshot = null; }
     try {
-      const entries = await invoke<{ revision: number; savedAt: string }[]>("list_project_history", {
-        path: projectPath, projectId: project.id, beforeRevision: more ? historyEntries.at(-1)?.revision : null,
+      const entries = await invoke<HistoryEntry[]>("list_project_history", {
+        path: projectPath, projectId: project.id, skip: more ? historyEntries.length : 0,
       });
       if (request !== historyRequest || startedSession !== session) return;
       historyEntries = more ? [...historyEntries, ...entries] : entries;
@@ -323,33 +432,36 @@
     finally { if (request === historyRequest) historyLoading = false; }
   }
 
-  async function previewHistory(revision: number) {
+  async function previewHistory(entry: HistoryEntry) {
     if (!projectPath) return;
-    historyLoading = true; historyError = ""; historySnapshot = null;
+    historyLoading = true; historyError = ""; historySnapshot = null; historyCommit = null;
     const request = ++historyRequest;
     const startedSession = session;
     const base = project.revision;
     try {
-      const snapshot = parseProject(await invoke("load_project_revision", { path: projectPath, projectId: project.id, revision }));
+      const snapshot = parseProject(await invoke("load_project_revision", { path: projectPath, projectId: project.id, commit: entry.commit }));
       if (request !== historyRequest || startedSession !== session) return;
-      if (snapshot.id !== project.id || snapshot.revision !== revision) throw new Error("Unexpected project revision.");
-      historySnapshot = snapshot; historyBaseRevision = base;
-    } catch (error) { if (request === historyRequest) historyError = `Could not preview revision: ${error}`; }
+      if (snapshot.id !== project.id) throw new Error("This commit holds another project.");
+      historySnapshot = snapshot; historyCommit = entry; historyBaseRevision = base;
+    } catch (error) { if (request === historyRequest) historyError = `Could not preview commit: ${error}`; }
     finally { if (request === historyRequest) historyLoading = false; }
   }
 
   function restoreHistory() {
-    if (!historySnapshot || historyLoading || project.revision !== historyBaseRevision) return;
+    if (!historySnapshot || !historyCommit || historyLoading || project.revision !== historyBaseRevision) return;
     try {
-      const revision = historySnapshot.revision;
-      commitProject(restoreSnapshot(project, historySnapshot), `Restore saved revision ${revision}`, undefined, true);
+      const commit = historyCommit.commit.slice(0, 8);
+      // A snapshot read from Git carries no session state; keep the open tab when it still exists.
+      const snapshot = { ...historySnapshot, activeDocumentId: historySnapshot.documents.some(d => d.id === activeTabId) ? activeTabId : historySnapshot.activeDocumentId };
+      commitProject(restoreSnapshot(project, snapshot), `Restore commit ${commit}`, undefined, true);
       closeHistory();
-      status = `Restored saved revision ${revision} as a new working revision. Save to keep it; Undo returns to your previous work.`;
+      status = `Restored commit ${commit} as a new working revision. Save to keep it; Undo returns to your previous work.`;
     } catch (error) { historyError = `Restore failed: ${error}`; }
   }
 
   onMount(() => {
     void initializeRuntime();
+    void refreshAiStatus();
     if (!isTauri()) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
@@ -390,21 +502,22 @@
       <input aria-label="Project name" value={project.name} oninput={(e) => renameProject(e.currentTarget.value)} />
       <span>{syncing ? "Synchronizing edits…" : dirty ? "Unsaved changes" : projectPath ? "Saved" : "New project"}</span>
       <button disabled={fileBusy} onclick={newProject}>New project</button>
-      <button disabled={fileBusy} onclick={openProject}>Open project</button>
+      <button disabled={fileBusy} onclick={() => openProject()}>Open project</button>
       <button disabled={fileBusy} onclick={() => saveProject()}>Save project</button>
       <button disabled={fileBusy} onclick={() => saveProject(true)}>Save as…</button>
+      <button disabled={fileBusy} onclick={() => openProject(true)} title="Open a project saved by an older ArchGen as a single .archgen file">Import .archgen</button>
     </div>
     <div class="history-bar">
       <button disabled={fileBusy || !undoHistory.past.length} onclick={() => undoRedo("undo")} title={undoHistory.past.at(-1)?.label}>Undo</button>
       <button disabled={fileBusy || !undoHistory.future.length} onclick={() => undoRedo("redo")} title={undoHistory.future.at(-1)?.label}>Redo</button>
-      <button disabled={fileBusy || !projectPath} onclick={() => loadHistory()}>Saved history</button>
-      <span>Undo/Redo: current session · Saved history: versions saved to this file</span>
+      <button disabled={fileBusy || !projectPath} onclick={() => loadHistory()}>Git history</button>
+      <span>Undo/Redo: current session · Git history: commits of the project folder</span>
     </div>
     {#if status}<div class="project-status" role="status">{status}</div>{/if}
     <div class="pending-results">
     {#each jobList.filter(j => ["queued", "running", "failed", "interrupted", "cancelled"].includes(j.status)) as job (job.id)}
       <div class="project-status">
-        {job.baseDocument.name}: {job.status}{job.error ? ` — ${job.error}` : ""}
+        {job.baseDocument.name}: {job.status}{reworkLabel(job.request)}{job.error ? ` — ${job.error}` : ""}
         {#if job.status === "queued" || job.status === "running"}
           <button onclick={() => cancelJob(job.id)}>Cancel generation</button>
         {:else if job.status !== "cancelled"}<button onclick={() => discardResult(job.id)}>Dismiss job</button>{/if}
@@ -412,7 +525,7 @@
     {/each}
     {#each pending as item (item.id)}
       <div class="project-status">
-        Result for {item.target.name} is waiting for review.
+        Result for {item.target.name} is waiting for review.{reworkLabel(item.request)}{item.summary ? ` — ${item.summary}` : ""}
         <button onclick={() => reviewingId = item.id}>Review changes</button>
         <button onclick={() => recoverResult(item.id)}>Recover as new document</button>
         <button onclick={() => discardResult(item.id)}>Discard result</button>
@@ -453,9 +566,12 @@
       sections={activeTab.sections}
       {isGenerating}
       selectedLanguage={activeTab.language}
+      {selection}
       onSectionsChange={setSections}
       {onGenerate}
       onError={(message: string) => status = message}
+      onToggleSection={toggleSectionSelection}
+      onToggleDiagram={toggleDiagramSelection}
     />
     {/key}
     <PromptPanel
@@ -463,14 +579,47 @@
       bind:isGenerating
       selectedTemplate={activeTab.template}
       selectedLanguage={activeTab.language}
+      {selection}
+      {includeContext}
+      {aiStatus}
+      {aiStatusError}
+      {documentScopeArmed}
+      {session}
       {onGenerate}
+      onClearSelection={clearSelection}
+      onOpenAiSettings={() => {
+        aiSettingsOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        aiSettingsOpen = true;
+        void refreshAiStatus();
+      }}
+      onArmDocumentScope={armDocumentScope}
+      onIncludeContextChange={setIncludeContext}
     />
   </div>
 </div>
 
+{#if aiSettingsOpen}
+  <AiSettings
+    {aiStatus}
+    {aiStatusError}
+    onStatusChange={(next) => aiStatus = next}
+    onRetry={refreshAiStatus}
+    onClose={() => {
+      aiSettingsOpen = false;
+      // The opener is still inert while the modal `<dialog>` is in the DOM;
+      // wait for the `{#if}` block to actually remove it before focusing back.
+      void tick().then(() => aiSettingsOpener?.focus());
+    }}
+  />
+{/if}
+
 {#if reviewing}
   <Modal title={`Review changes — ${reviewing.target.name}`} onClose={() => reviewingId = null}>
     <p>The proposal replaces this document's sections, including the diagram source shown below. Nothing changes until you accept.</p>
+    {#if reviewing.request.kind === "rework"}
+      <p>AI rework of {reworkTargets(reviewing.request, reviewing.baseDocument)} · {reviewing.request.provider}{reviewing.request.model ? ` (${reviewing.request.model})` : ""}</p>
+      {#if reviewing.summary}<p class="job-summary">{reviewing.summary}</p>{/if}
+    {/if}
     {#if !reviewCompatible}
       <p class="conflict" role="alert">The original document changed or closed. Acceptance is blocked. Recover as a new document to keep this result.</p>
       <details><summary>Current document source</summary><pre class="current-source">{project.documents.find(d => d.id === reviewing!.target.documentId)?.sections.map(sectionSource).join("\n\n") ?? "Document is no longer open in this project."}</pre></details>
@@ -485,18 +634,18 @@
 {/if}
 
 {#if historyOpen}
-  <Modal title="Saved project history" onClose={closeHistory}>
-    <p>These are saved versions of the whole project. Restore creates a new working revision; save it to keep it. Your current work remains available through Undo.</p>
+  <Modal title="Project history from Git" onClose={closeHistory}>
+    <p>These are the Git commits that changed this project folder; uncommitted saves are not listed. Restore creates a new working revision; save it to keep it. Your current work remains available through Undo.</p>
     {#if historyError}<p role="alert">{historyError}</p>{/if}
     {#if historyLoading}<p role="status">Loading history…</p>{/if}
     <div class="revision-list">
-      {#each historyEntries as entry (entry.revision)}
-        <button disabled={historyLoading} onclick={() => previewHistory(entry.revision)}>Revision {entry.revision} · {entry.savedAt} UTC</button>
+      {#each historyEntries as entry (entry.commit)}
+        <button disabled={historyLoading} onclick={() => previewHistory(entry)}>{entry.commit.slice(0, 8)} · {entry.savedAt} · {entry.summary}</button>
       {/each}
       {#if historyMore}<button disabled={historyLoading} onclick={() => loadHistory(true)}>Load older versions</button>{/if}
     </div>
     {#if historySnapshot}
-      <h3>Revision {historySnapshot.revision}: {historySnapshot.name}</h3>
+      <h3>Commit {historyCommit?.commit.slice(0, 8)}: {historySnapshot.name}</h3>
       <p>Project name: {project.name} → {historySnapshot.name}</p>
       {#each historySnapshot.documents as document (document.id)}
         {@const current = project.documents.find(d => d.id === document.id)}
@@ -508,10 +657,10 @@
         <h4>Remove document: {removed.name}</h4>
         <ChangePreview before={removed.sections} after={[]} />
       {/each}
-      {#if project.revision !== historyBaseRevision}<p role="alert">The project changed during preview. Select the revision again before restoring.</p>{/if}
+      {#if project.revision !== historyBaseRevision}<p role="alert">The project changed during preview. Select the commit again before restoring.</p>{/if}
       <div class="review-actions"><button disabled={historyLoading || project.revision !== historyBaseRevision} onclick={restoreHistory}>Restore this version</button></div>
     {:else if !historyLoading && !historyEntries.length && !historyError}
-      <p>No saved versions found.</p>
+      <p>No commits contain this project folder yet.</p>
     {/if}
   </Modal>
 {/if}
@@ -530,7 +679,8 @@
   .project-bar input { min-width: 100px; flex: 1; padding: 6px; color: var(--text-primary); background: var(--bg-tertiary); border: 1px solid var(--border); }
   .project-bar span { font-size: 12px; color: var(--text-muted); }
   .project-bar button, .project-status button { padding: 6px 10px; background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px; }
-  .project-status { padding: 8px 20px; font-size: 12px; overflow-wrap: anywhere; background: var(--bg-secondary); }
+  .project-status { padding: 8px 20px; font-size: 12px; overflow-wrap: anywhere; white-space: pre-line; background: var(--bg-secondary); }
+  .job-summary { white-space: pre-line; }
   .layout {
     display: flex;
     height: 100vh;

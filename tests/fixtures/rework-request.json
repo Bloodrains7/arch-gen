@@ -1,0 +1,16 @@
+{
+  "kind": "rework",
+  "instruction": "Prepíš formálnejšie.",
+  "language": "sk",
+  "scope": "selection",
+  "sectionIds": [
+    "section-a",
+    "section-b"
+  ],
+  "diagramIds": [
+    "diagram-c"
+  ],
+  "includeContext": false,
+  "provider": "claude_cli",
+  "model": ""
+}

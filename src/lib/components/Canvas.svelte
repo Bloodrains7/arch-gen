@@ -4,14 +4,18 @@
   import PlantUMLPreview from "./PlantUMLPreview.svelte";
   import type { Section } from "../project";
   import type { GenerationRequest } from "../runtime";
+  import { isSectionSelected, isDiagramSelected, emptySelection } from "../selection";
 
   let {
     sections = [],
     isGenerating,
     selectedLanguage = "en",
+    selection = emptySelection(),
     onSectionsChange = (_s: any[], _group?: string) => {},
     onGenerate = async (_request: GenerationRequest) => {},
     onError = (_message: string) => {},
+    onToggleSection = (_id: string) => {},
+    onToggleDiagram = (_sectionId: string, _diagramId: string) => {},
   } = $props();
   let dragOverIndex: number | null = $state(null);
   let previewMode: "edit" | "preview" | "split" = $state("edit");
@@ -435,12 +439,20 @@ ALTER TABLE ...
           <div
             class="section-card"
             class:drag-over={dragOverIndex === i}
+            class:selected={isSectionSelected(selection, section.id ?? "")}
             ondragover={(e) => handleDragOver(e, i)}
             ondragleave={(e) => handleDragLeave(e)}
             ondrop={(e) => handleDrop(e, i)}
             role="region"
           >
             <div class="section-header">
+              <input
+                type="checkbox"
+                class="block-select"
+                aria-label={`Select section ${i + 1}: ${section.title || "untitled"} for AI`}
+                checked={isSectionSelected(selection, section.id ?? "")}
+                onchange={() => onToggleSection(section.id ?? "")}
+              />
               <h2
                 class="section-title"
                 contenteditable="true"
@@ -477,8 +489,16 @@ ALTER TABLE ...
             {#if section.diagrams.length > 0}
               <div class="diagram-list">
                 {#each section.diagrams as diagram, di}
-                  <div class="diagram-block">
+                  <div class="diagram-block" class:selected={isDiagramSelected(selection, diagram.id ?? "") || isSectionSelected(selection, section.id ?? "")}>
                     <div class="diagram-remove">
+                      <input
+                        type="checkbox"
+                        class="block-select"
+                        aria-label={`Select diagram ${di + 1} (${diagram.diagram_type}) in section ${i + 1}: ${section.title} for AI`}
+                        checked={isDiagramSelected(selection, diagram.id ?? "") || isSectionSelected(selection, section.id ?? "")}
+                        disabled={isSectionSelected(selection, section.id ?? "")}
+                        onchange={() => onToggleDiagram(section.id ?? "", diagram.id ?? "")}
+                      />
                       <button class="remove-btn small" onclick={() => removeDiagram(i, di)}>×</button>
                     </div>
                     <PlantUMLPreview content={diagram.content} format={diagram.format} />
@@ -574,14 +594,26 @@ ALTER TABLE ...
     box-shadow: 0 0 0 2px var(--accent-dim);
   }
 
+  .section-card.selected, .diagram-block.selected {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-dim);
+  }
+
+  .block-select {
+    flex-shrink: 0;
+    accent-color: var(--accent);
+  }
+
   .section-header {
     display: flex;
     align-items: center;
+    gap: 10px;
     justify-content: space-between;
     margin-bottom: 12px;
   }
 
   .section-title {
+    flex: 1;
     font-size: 16px;
     font-weight: 600;
     color: var(--text-primary);
@@ -831,6 +863,8 @@ ALTER TABLE ...
 
   .diagram-remove {
     display: flex;
+    align-items: center;
+    gap: 8px;
     justify-content: flex-end;
     padding: 4px 4px 0;
   }
