@@ -1,0 +1,4 @@
+langgraph
+dspy-ai
+pydantic
+ollama

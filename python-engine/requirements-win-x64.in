@@ -1,0 +1,10 @@
+# Direct dependencies of the Windows CPython 3.14 staging profile.
+# Resolve separately from the developer's installed packages; never pip freeze them.
+dspy==3.1.3
+langgraph==1.0.10
+pydantic==2.13.3
+ollama==0.6.1
+# Keep the provider bridge baseline; NumPy uses a non-yanked patch release.
+litellm==1.82.0
+numpy==2.4.6
+openai==2.26.0

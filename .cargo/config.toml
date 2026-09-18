@@ -1,0 +1,4 @@
+[env]
+# Override with an absolute PYO3_PYTHON environment variable for a build venv.
+# Do not commit a developer-specific Python installation path.
+PYO3_PYTHON = "python"
