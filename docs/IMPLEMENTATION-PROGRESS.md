@@ -149,6 +149,47 @@ na Linuxe spustiť nedá, zlyhávajú rovnako ako pred zmenou), 52 JS testov (+1
 s mockovaným IPC (+5), 11 Python testov, typová kontrola bez chýb (5 existujúcich CSS warnings).
 Na Windows ani v desktopovej aplikácii s reálnym Tauri IPC tento prírastok zatiaľ overený nebol.
 
+## E1, tretí prírastok — C4, Mermaid, jeden AI provider a export webu
+
+Implementované 2026-09-24, štyri kroky z [ZLEPSENIA.md](ZLEPSENIA.md) (P1). Každý robil
+samostatný agent v izolovanom git worktree; výsledky boli skontrolované, zlúčené a otestované
+spolu. Pri kontrole pribudli dve opravy (nižšie).
+
+- **C4 v lokálnom rendereri** (`renderer.rs`): povolené presne C4 stdlib include
+  (`!include <C4/C4_Context>` a ďalšie), porovnanie po trim bez ohľadu na veľkosť písmen,
+  do rendereru ide vždy kanonický zápis; všetky ostatné direktívy zostávajú zakázané. Overené so
+  skutočným `plantuml.jar` 1.2026.8 (SHA-256 podľa pinu) a argumentmi rendereru vrátane SANDBOX.
+  Python engine má C4 príklady. Pozri [RUNTIME-DISTRIBUTION.md](RUNTIME-DISTRIBUTION.md).
+- **Lokálny Mermaid** (`src/lib/mermaid.ts`, [DIAGRAMY.md](DIAGRAMY.md)): mermaid 12.0.0 načítaný
+  lenivo mimo hlavného balíka, `securityLevel: "strict"`, textové popisky, sériové vykresľovanie,
+  automatický náhľad s ochranou pred zastaraným výsledkom, vloženie do HTML aj site exportu.
+  Štýly Mermaid sa prepíšu do atribútov, aby diagram po sanitizácii zostal čitateľný.
+  - *Oprava z kontroly:* direktíva `%%{init: {"themeCSS": "… url(https://…)"}}%%` spustila
+    sieťovú požiadavku (zdroj diagramu môže pochádzať z cudzieho repozitára). Náhľad teraz takéto
+    direktívy, `config:` v hlavičke a štýly s `url(`, `\` či `@` odmieta s jasnou správou a
+    Mermaid má `secure` kľúče; e2e overuje päť variantov bez jedinej požiadavky von.
+  - *Oprava z kontroly:* sanitizér ponecháva odkazy `url(#id)` v rámci toho istého SVG, takže
+    hrany majú znova šípky; každé iné `url()` (aj cez CSS escape) odstráni.
+- **Docs/Diagram cez nakonfigurovaného providera** (`ai/generate.rs`, [AI-REWORK.md](AI-REWORK.md)):
+  rovnaká cesta ako Rework – provider a model zaznamenané v úlohe a overené pred volaním,
+  veta o príjemcovi pred odoslaním vo všetkých režimoch, potvrdenie pri pretiahnutí diagramu na
+  cloudového providera, zrušenie ukončí proces providera, výsledok ide cez Review changes.
+  Dokumentácia generuje presne sekcie šablóny (názvy aj návody z `templates.ts`), ID prideľuje
+  aplikácia. Úloha bez providera zlyhá, nikdy potichu nepoužije iný engine. Python engine sa na
+  generovanie už nepoužíva ([AI-PROVIDER.md](AI-PROVIDER.md)).
+- **Export webu** (`site-export.ts`, `site.rs`, [EXPORT.md](EXPORT.md)): **Export site…** zapíše
+  do nového alebo prázdneho priečinka `index.md`, stránku na dokument s front matter, diagramy ako
+  sanitizované SVG, `toc.yml` (DocFX / Microsoft Learn) a `mkdocs.yml`. Rust overí každú cestu
+  pred zápisom (žiadne `..`, absolútne cesty, kolízie bez ohľadu na veľkosť písmen, limity).
+- `project::safe_name` vo Windows odmieta názvy zariadení (`CON.md`, `COM1.puml`) – chráni
+  manifesty z cudzích repozitárov, šablóny aj export.
+
+Overenie po zlúčení všetkých krokov: Rust 234 testov (+30; 7 testov DPAPI/Windows ciest sa na
+Linuxe spustiť nedá), 73 JS (+21), 70 UI testov s mockovaným IPC (+15), 12 Python, typová kontrola
+bez chýb (5 existujúcich CSS warnings), produkčný build. Hlavný balík narástol o ~3 kB; Mermaid
+je samostatný chunk. Žiadny živý AI provider ani desktopová aplikácia s reálnym Tauri IPC
+(WebView2) v tomto prírastku overené neboli.
+
 ## Čo ešte nie je dokončené z E0
 
 Nejde o dokončenie celej etapy. Ukladanie je explicitné, bez autosave a automatického otvorenia posledného projektu. História sú Git commity, nie každé uloženie. Neprijaté AI výsledky zostávajú v lokálnom registri, nie v priečinku projektu.

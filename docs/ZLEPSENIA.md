@@ -22,21 +22,22 @@ Podrobnosti: [IMPLEMENTATION-PROGRESS.md](IMPLEMENTATION-PROGRESS.md), návod: [
 
 ## B. Odporúčané ďalšie kroky podľa priority
 
-### P1 – bez toho architekt narazí hneď
+### P1 – hotové v druhom prírastku (2026-09-24)
 
-1. **C4 diagramy v lokálnom rendereri.** C4-PlantUML je štandard pre architektúru, ale renderer
-   dnes odmieta všetky `!include`. PlantUML má C4 knižnicu priamo v `plantuml.jar`
-   (`!include <C4/C4_Container>`), takže stačí povoliť whitelist `!include <C4/…>` (a iné stdlib
-   `<…>`), stále bez `!includeurl` a súborových include. Veľký prínos, malé riziko.
-2. **Lokálny Mermaid.** GitHub, GitLab aj Azure DevOps Mermaid vykresľujú priamo; v ArchGen sa
-   zobrazí iba zdroj. Balík `mermaid` vo webview so `securityLevel: "strict"` a sanitizovaným SVG
-   (rovnako ako `local-svg.ts`) to vyrieši bez siete.
-3. **Docs/Diagram cez rovnakého AI providera ako Rework.** Nastavenia AI dnes platia iba pre
-   Rework; Docs/Diagram idú cez Python a Ollamu. Jednotné `ai::complete` so schémou sekcií
-   odstráni dve konfigurácie a umožní štruktúrované výstupy aj pre generovanie.
-4. **Export celého projektu ako dokumentačného webu.** Priečinok s `index.md`, stránkou na
-   dokument, SVG diagramami vedľa Markdownu a `toc.yml` (DocFX / Microsoft Learn) alebo
-   `mkdocs.yml`. Front matter je už pripravený.
+Každý krok spravil samostatný agent v izolovanom worktree; výsledky boli skontrolované, zlúčené
+a otestované spolu ([IMPLEMENTATION-PROGRESS.md](IMPLEMENTATION-PROGRESS.md)).
+
+1. ~~C4 diagramy v lokálnom rendereri~~ – povolené presne C4 stdlib include, overené so
+   skutočným `plantuml.jar`.
+2. ~~Lokálny Mermaid~~ – offline v aplikácii, sanitizovaný, aj v HTML a site exporte.
+   Pri kontrole sa ukázalo, že Mermaid direktíva `themeCSS` vedela spustiť sieťovú požiadavku;
+   takéto zdroje sa teraz odmietajú.
+3. ~~Docs/Diagram cez rovnakého AI providera ako Rework~~ – Python engine sa na generovanie
+   už nepoužíva.
+4. ~~Export celého projektu ako dokumentačného webu~~ – `toc.yml`, `mkdocs.yml`, SVG diagramy.
+
+Otvorené rozhodnutie: Python engine (≈ 390 MB v portable balíku) už negeneruje. Ak ho netreba
+na nič iné, jeho odstránenie výrazne zmenší a zjednoduší distribúciu – rozhodnutie pre teba.
 
 ### P2 – kvalita architektonickej práce
 
@@ -56,8 +57,10 @@ Podrobnosti: [IMPLEMENTATION-PROGRESS.md](IMPLEMENTATION-PROGRESS.md), návod: [
 
 ### P3 – prevádzka a bezpečnosť
 
-11. **CSP** v `tauri.conf.json` (dnes `null`); aplikácia už nič vzdialené nepotrebuje okrem
-    voliteľného verejného PlantUML servera.
+11. **CSP** v `tauri.conf.json` (dnes `null`) – teraz najdôležitejší bod P3: Mermaid vkladá SVG
+    a CSS do živej stránky, a hoci sa rizikové zdroje odmietajú, CSP by sieťové požiadavky
+    zablokovala systémovo. Treba ju overiť v skutočnej aplikácii (WebView2, Monaco workery,
+    Tauri IPC); aplikácia nič vzdialené nepotrebuje okrem voliteľného verejného PlantUML servera.
 12. **Single-instance ochrana** – druhá inštancia dnes prerušuje úlohy prvej.
 13. **Visio/EA**: buď skutočná implementácia (EA automation, VSDX), alebo export do formátu,
     ktorý tieto nástroje importujú (XMI pre EA, draw.io/VSDX pre Visio) bez COM.
