@@ -84,6 +84,36 @@ package "PackageName" {
 }
 [Component1] --> [Component2]
 @enduml""",
+    "c4_context": """@startuml
+!include <C4/C4_Context>
+
+Person(user, "User", "A user of the system")
+System(system, "SystemName", "What this system does")
+System_Ext(external, "ExternalSystemName", "An external dependency")
+
+Rel(user, system, "Uses")
+Rel(system, external, "Calls")
+
+SHOW_LEGEND()
+@enduml""",
+    "c4_container": """@startuml
+!include <C4/C4_Container>
+
+Person(user, "User", "A user of the system")
+System_Boundary(c1, "SystemName") {
+  Container(web, "Web Application", "Technology", "Delivers the UI")
+  Container(api, "API", "Technology", "Handles business logic")
+  ContainerDb(db, "Database", "Technology", "Stores data")
+}
+System_Ext(external, "ExternalSystemName", "An external dependency")
+
+Rel(user, web, "Uses", "HTTPS")
+Rel(web, api, "Calls", "IPC")
+Rel(api, db, "Reads/writes")
+Rel(api, external, "Calls", "HTTPS")
+
+LAYOUT_WITH_LEGEND()
+@enduml""",
 }
 
 
@@ -93,7 +123,8 @@ class GeneratePlantUML(dspy.Signature):
     Use the syntax_example as reference for correct PlantUML syntax.
     CRITICAL RULES:
     - For NEW diagrams: generate ONLY elements explicitly mentioned, nothing extra.
-    - For UPDATES (when existing_diagram is provided): You MUST keep ALL existing fields, entities, and relationships EXACTLY as they are. Only apply the specific change requested. Do NOT rename, remove, or merge any existing fields. Copy the existing diagram first, then apply ONLY the requested modification."""
+    - For UPDATES (when existing_diagram is provided): You MUST keep ALL existing fields, entities, and relationships EXACTLY as they are. Only apply the specific change requested. Do NOT rename, remove, or merge any existing fields. Copy the existing diagram first, then apply ONLY the requested modification.
+    - For C4 diagrams (diagram_type c4_context or c4_container): you MUST start with the PlantUML stdlib include shown in syntax_example (`!include <C4/C4_Context>` or `!include <C4/C4_Container>`). NEVER use a URL include (`!includeurl ...`) or a file include of a local/remote C4-PlantUML.puml — the local renderer has no network or file access and only accepts that exact stdlib include."""
 
     system_description: str = dspy.InputField(desc="User instruction — what to generate or what change to apply")
     diagram_type: str = dspy.InputField(desc="Type of diagram")
@@ -369,6 +400,53 @@ TEMPLATE_SECTIONS = {
         "Technology Architecture",
         "Migration Planning",
     ],
+    # Keep in sync with src/lib/templates.ts, which adds per-section guidance.
+    "solution-design": [
+        "Overview",
+        "Business Context and Goals",
+        "Requirements",
+        "Architecture",
+        "Components",
+        "Data Flow",
+        "Integration and APIs",
+        "Data Model",
+        "Security",
+        "Reliability",
+        "Performance Efficiency",
+        "Cost Optimization",
+        "Operational Excellence",
+        "Alternatives Considered",
+        "Risks and Open Questions",
+    ],
+    "adr": [
+        "Status and Metadata",
+        "Context and Problem Statement",
+        "Decision Drivers",
+        "Considered Options",
+        "Decision Outcome",
+        "Consequences",
+        "Pros and Cons of the Options",
+        "Confirmation",
+        "More Information",
+    ],
+    "well-architected": [
+        "Workload Summary",
+        "Reliability",
+        "Security",
+        "Cost Optimization",
+        "Operational Excellence",
+        "Performance Efficiency",
+        "Findings and Recommendations",
+        "Action Plan",
+    ],
+    "release-notes": [
+        "Summary",
+        "New Features",
+        "Improvements",
+        "Bug Fixes",
+        "Breaking Changes and Upgrade Steps",
+        "Known Issues",
+    ],
 }
 
 
@@ -421,6 +499,10 @@ def generate_diagrams(state: AgentState) -> dict:
             "Business Architecture": "activity",
             "Information Systems Architecture": "component",
             "Technology Architecture": "deployment",
+        },
+        "solution-design": {
+            "Architecture": "component",
+            "Data Flow": "sequence",
         },
     }
 

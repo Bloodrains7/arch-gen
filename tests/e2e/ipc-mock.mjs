@@ -173,11 +173,17 @@ export function installIpcMock(fixtures) {
         const project = sessions.get(args.sessionId);
         const doc = project.documents.find(d => d.id === args.documentId);
         if (doc.revision !== args.expectedDocumentRevision) throw new Error("Document revision conflict");
-        if (args.request.kind === "rework") {
-          const req = args.request;
-          if (req.provider !== aiStatus.provider) {
-            throw new Error("AI settings changed after this request was created. Create the request again.");
-          }
+        const req = args.request;
+        // Documentation and Diagram now go through the configured provider exactly like
+        // Rework (docs/AI-REWORK.md): every kind's own `provider` must match what is
+        // configured, mirroring `create_job_as` (runtime.rs).
+        if (["documentation", "diagram", "rework"].includes(req.kind) && req.provider !== aiStatus.provider) {
+          throw new Error("AI settings changed after this request was created. Create the request again.");
+        }
+        if (req.kind === "documentation" && (!Array.isArray(req.sections) || req.sections.length === 0)) {
+          throw new Error("Choose at least one section to generate.");
+        }
+        if (req.kind === "rework") {
           // Mirrors the scope/target refusals `create_job_as` makes (runtime.rs),
           // so a request that never should have reached the backend (a widened
           // scope, a pruned-away target) fails here exactly like it would there.
@@ -206,8 +212,12 @@ export function installIpcMock(fixtures) {
           if (latest.status !== "running") { resolve(latest); return; }
           let sections;
           if (job.request.kind === "documentation") {
+            // `raw`: `{summary, sections:[{title, content, diagrams}]}` — the AI answer
+            // shape (docs/AI-REWORK.md). The mock does not enforce "use the requested
+            // title, not the model's" itself (that contract is Rust's, covered by its own
+            // unit tests); it keeps whatever title the test supplies.
             sections = raw.sections.map(s => ({ ...s, id: crypto.randomUUID(),
-              diagrams: s.diagrams.map(g => ({ ...g, id: crypto.randomUUID() })) }));
+              diagrams: (s.diagrams ?? []).map(g => ({ ...g, id: crypto.randomUUID() })) }));
           } else if (job.request.kind === "rework") {
             // The mock never computes a merge itself: the test supplies the
             // exact post-merge sections (which ids stayed, which are new), the
@@ -215,15 +225,21 @@ export function installIpcMock(fixtures) {
             sections = raw.sections.map(s => ({ ...s, id: s.id || crypto.randomUUID(),
               diagrams: (s.diagrams ?? []).map(g => ({ ...g, id: g.id || crypto.randomUUID() })) }));
           } else {
+            // `raw`: `{summary, diagram:{format, content}}`. Updating an existing diagram
+            // keeps its id/type/format (only `content` changes); a new one gets the
+            // model's own format, mirroring `merge_diagram`/`diagram_outcome` (runtime.rs).
             sections = clone(job.baseDocument.sections);
             let section = sections.find(s => s.id === job.request.sectionId);
             if (!section) { section = { id: crypto.randomUUID(), title: "Diagram", content: "", diagrams: [] }; sections.push(section); }
-            const existing = section.diagrams.findIndex(g => g.id === job.request.diagramId);
-            const diagram = { ...raw, id: job.request.diagramId ?? crypto.randomUUID() };
-            if (existing < 0) section.diagrams.push(diagram); else section.diagrams[existing] = diagram;
+            const existingIndex = section.diagrams.findIndex(g => g.id === job.request.diagramId);
+            if (existingIndex >= 0) {
+              section.diagrams[existingIndex] = { ...section.diagrams[existingIndex], content: raw.diagram.content };
+            } else {
+              section.diagrams.push({ id: crypto.randomUUID(), diagram_type: job.request.diagramType,
+                format: raw.diagram.format, content: raw.diagram.content });
+            }
           }
-          const summary = job.request.kind === "rework" ? (raw.summary ?? null) : (latest.summary ?? null);
-          resolve(putJob({ ...latest, status: "ready", sections, summary }));
+          resolve(putJob({ ...latest, status: "ready", sections, summary: raw.summary ?? null }));
         }; });
       }
       if (command === "cancel_generation_job" || command === "discard_generation_job") {
@@ -251,7 +267,12 @@ export function installIpcMock(fixtures) {
       // like the backend it refuses a save over content it did not hand out (fingerprint).
       const commitId = index => (index + 1).toString(16).padEnd(40, "0");
       const fingerprint = project => `fp-${JSON.stringify(project).length}-${project.revision}`;
-      if (command === "plugin:dialog|open") return args.options?.directory ? "fixture-project" : "legacy.archgen";
+      // window.directoryPickResult overrides a folder pick (e.g. to null, for "dialog cancelled"),
+      // the same escape-hatch pattern as window.confirmResult / window.loadFixture below.
+      if (command === "plugin:dialog|open") {
+        if (args.options?.directory) return "directoryPickResult" in window ? window.directoryPickResult : "fixture-project";
+        return "legacy.archgen";
+      }
       if (command === "save_project") {
         const stored = localStorage.getItem("test-saved-project");
         if (args.expectedFingerprint != null && (!stored || fingerprint(JSON.parse(stored)) !== args.expectedFingerprint)) throw new Error("Project changed on disk");
@@ -277,7 +298,62 @@ export function installIpcMock(fixtures) {
         return { project, fingerprint: fingerprint(project) };
       }
       if (command === "import_legacy_project") return window.loadFixture;
-      if (command === "get_template") return ["Overview", "Data model"];
+      // Git (git.rs, release.rs). Argument names are checked like the ai_* commands:
+      // a misnamed IPC argument is exactly what a mocked UI test must not hide.
+      const git = window.gitFixture ?? {};
+      if (command === "git_list_refs") {
+        noUnknownArgs(args, ["path"]);
+        if (git.refsError) throw new Error(git.refsError);
+        return clone(git.refs ?? { root: "/repo", branch: "main", head: "c".repeat(40), refs: [
+          { name: "v1.1.0", kind: "tag", commit: "b".repeat(40), date: "2026-09-10T10:00:00+02:00" },
+          { name: "v1.0.0", kind: "tag", commit: "a".repeat(40), date: "2026-08-01T10:00:00+02:00" },
+          { name: "main", kind: "branch", commit: "c".repeat(40), date: "2026-09-20T10:00:00+02:00" },
+        ] });
+      }
+      if (command === "git_log_range") {
+        noUnknownArgs(args, ["path", "from", "to", "subpath", "includeMerges"]);
+        const commit = (n, subject, body = "") => ({ hash: String(n).repeat(40).slice(0, 40), shortHash: String(n).repeat(7), parents: 1, author: "Ján Novák", date: "2026-09-20T10:00:00+02:00", subject, body });
+        return clone(git.range ?? { root: "/repo", from: "b".repeat(40), to: "c".repeat(40), truncated: false, commits: [
+          commit(1, "feat(api): add refunds (#12)"), commit(2, "fix: rounding in totals"), commit(3, "chore: bump deps"),
+        ] });
+      }
+      if (command === "git_project_status") {
+        noUnknownArgs(args, ["path", "projectId"]);
+        if (git.statusError) throw new Error(git.statusError);
+        const committed = window.gitCommitted;
+        return clone(git.status ?? { root: "/repo", branch: "main", head: "c".repeat(40), upstream: "origin/main", ahead: committed ? 1 : 0, behind: 0, truncated: false,
+          changes: committed ? [] : [{ path: "archgen.json", status: "untracked" }, { path: "documents/untitled/document.json", status: "untracked" }] });
+      }
+      if (command === "git_commit_project") {
+        noUnknownArgs(args, ["path", "projectId", "expectedFingerprint", "message"]);
+        const stored = localStorage.getItem("test-saved-project");
+        if (!stored || fingerprint(JSON.parse(stored)) !== args.expectedFingerprint) throw new Error("The project folder changed on disk since ArchGen last saved or opened it.");
+        window.gitCommitted = args.message;
+        return { commit: "d".repeat(40), summary: args.message.split("\n")[0], files: 2 };
+      }
+      if (command === "git_push_project") {
+        noUnknownArgs(args, ["path", "projectId"]);
+        window.gitPushed = true;
+        return "Pushed main to origin.";
+      }
+      if (command === "list_release_templates") {
+        noUnknownArgs(args, ["path", "projectId"]);
+        return clone(window.releaseTemplates ?? []);
+      }
+      if (command === "save_release_template") {
+        noUnknownArgs(args, ["path", "projectId", "name", "content", "overwrite"]);
+        const file = `${args.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
+        window.releaseTemplates = [...(window.releaseTemplates ?? []).filter(t => t.file !== file), { file, content: args.content, error: null }];
+        return file;
+      }
+      // site.rs: records the exported files for the test to inspect (window.exportedSite)
+      // instead of writing to a real filesystem.
+      if (command === "export_site") {
+        noUnknownArgs(args, ["path", "files"]);
+        if (window.exportSiteFailure) throw new Error(window.exportSiteFailure);
+        window.exportedSite = { path: args.path, files: clone(args.files) };
+        return { path: args.path, files: args.files.length, bytes: args.files.reduce((n, f) => n + f.content.length, 0) };
+      }
       throw new Error(`Unexpected IPC: ${command}`);
     },
   };

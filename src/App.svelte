@@ -6,12 +6,19 @@
   import Modal from "./lib/components/Modal.svelte";
   import ChangePreview from "./lib/components/ChangePreview.svelte";
   import AiSettings from "./lib/components/AiSettings.svelte";
+  import GitStatusBar from "./lib/components/GitStatusBar.svelte";
+  import ReleaseNotesDialog from "./lib/components/ReleaseNotesDialog.svelte";
   import { onMount, tick } from "svelte";
   import { invoke, isTauri } from "@tauri-apps/api/core";
   import { open, confirm } from "@tauri-apps/plugin-dialog";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { createProject, createDocument, updateDocument, captureTarget, applyGeneratedSections, parseProject, emptyHistory, recordChange, moveHistory, restoreSnapshot, sectionSource } from "./lib/project";
-  import type { Project, ProjectDocument, Section } from "./lib/project";
+  import { createProject, createDocument, updateDocument, normalizeSections, parseProject, emptyHistory, recordChange, moveHistory, restoreSnapshot, sectionSource } from "./lib/project";
+  import { applyTemplateStructure, findTemplate, isBlankSection } from "./lib/templates";
+  import type { Diagram, Project, ProjectDocument, Section } from "./lib/project";
+  import { buildSite, renderDiagrams } from "./lib/site-export";
+  import type { DiagramRenderer } from "./lib/site-export";
+  import { sanitizeSvg } from "./lib/local-svg";
+  import { renderMermaidSvg } from "./lib/mermaid";
   import { EditSession, jobCompatible } from "./lib/runtime";
   import type { GenerationJob, GenerationRequest } from "./lib/runtime";
   import { fetchAiStatus } from "./lib/ai";
@@ -64,6 +71,7 @@
   let aiStatus = $state<AiStatus | null>(null);
   let aiStatusError = $state("");
   let aiSettingsOpen = $state(false);
+  let releaseNotesOpen = $state(false);
   // The element to return focus to once the dialog's `{#if}` block has actually
   // left the DOM — captured at open time, since by then it is always the "AI
   // settings" button that has focus (settings-dialog-and-e2e-quality#11).
@@ -173,8 +181,26 @@
     undoHistory = { ...undoHistory, group: undefined };
   }
 
-  function setTemplate(tmpl: string) {
-    commitProject(updateDocument(project, activeTabId, { template: tmpl }), "Change template");
+  // Applying a template never loses content: matching sections are kept, other
+  // sections with content move after the template's, and only blank ones go.
+  function applyTemplate(id: string) {
+    const template = findTemplate(id);
+    if (!template) return;
+    const sections = applyTemplateStructure(activeTab.sections, template);
+    const kept = activeTab.sections.filter(s => sections.includes(s) && !isBlankSection(s)).length;
+    commitProject(updateDocument(project, activeTabId, { template: id, sections }), `Apply ${template.name} template`);
+    status = kept ? `Applied the ${template.name} structure; ${kept} existing section${kept === 1 ? " was" : "s were"} kept. Undo reverts it.` : `Applied the ${template.name} structure.`;
+  }
+
+  function createReleaseDocument(name: string, sections: Section[]) {
+    const created = { ...createDocument(name), template: "release-notes", language: activeTab.language, sections: normalizeSections(sections) };
+    commitProject({ ...project, revision: project.revision + 1, documents: [...tabs, created], activeDocumentId: created.id }, "Add release notes");
+    status = `Created document "${name}" from Git. Save the project to keep it.`;
+  }
+
+  function insertReleaseSections(sections: Section[]) {
+    commitProject(updateDocument(project, activeTabId, { sections: [...sections, ...activeTab.sections] }), "Insert release notes");
+    status = `Inserted release notes at the top of ${activeTab.name}. Save the project to keep them.`;
   }
 
   function setLanguage(lang: string) {
@@ -187,24 +213,6 @@
 
   function renameTab(id: string, name: string) {
     commitProject(updateDocument(project, id, { name }), "Rename document");
-  }
-
-  function beginUpdate(review = true) {
-    const target = captureTarget(project);
-    const startedSession = session;
-    let finished = false;
-    const finish = () => { finished = true; };
-    return Object.assign((sections: Section[]) => {
-      if (finished) return;
-      finish();
-      const result = startedSession === session ? applyGeneratedSections(project, target, sections) : null;
-      if (result && !review) {
-        commitProject(result, "Load template sections");
-        status = `Updated ${target.name}. Save the project to keep changes.`;
-      } else {
-        status = "The document changed while loading the template. Select the template again to apply it.";
-      }
-    }, { finish });
   }
 
   async function acceptResult(id: string) {
@@ -244,9 +252,10 @@
   }
 
   // Provider/model come from the job's own `request`, never from the current
-  // `aiStatus`: a rework job always ran with the provider it was created for.
+  // `aiStatus`: an AI job always ran with the provider it was created for.
+  // Documentation, Diagram and Rework all carry `provider`/`model` now.
   function reworkLabel(request: GenerationRequest): string {
-    return request.kind === "rework" ? ` · ${request.provider}${request.model ? ` (${request.model})` : ""}` : "";
+    return ` · ${request.provider}${request.model ? ` (${request.model})` : ""}`;
   }
 
   function reworkTargets(request: GenerationRequest, baseDocument: ProjectDocument): string {
@@ -309,10 +318,11 @@
       }
     } catch (error) {
       try { await refreshJobs(); } catch { /* Keep the original generation failure. */ }
-      // A rejected rework creation usually means AI settings changed underneath the
-      // request (a different provider configured, a key removed); refresh so the
-      // panel reflects what is actually configured now instead of a stale status.
-      if (request.kind === "rework") await refreshAiStatus();
+      // A rejected creation usually means AI settings changed underneath the request (a
+      // different provider configured, a key removed); refresh so the panel reflects what
+      // is actually configured now instead of a stale status. Every kind goes through the
+      // configured provider now (Documentation and Diagram exactly like Rework).
+      await refreshAiStatus();
       throw error;
     } finally { if (preparing) preparingJobs--; }
   }
@@ -376,6 +386,36 @@
       projectPath = path; savedRevision = snapshot.revision;
       status = `Saved ${path}${project.revision !== snapshot.revision ? " — newer edits still need saving." : ""}`;
     } catch (error) { status = `Save failed: ${error}`; }
+    finally { fileBusy = false; }
+  }
+
+  const today = () => new Date().toLocaleDateString("sv-SE");
+
+  // Exports the project as it is now, unsaved edits included (dirty says so in the status
+  // line). Diagrams render locally as in the HTML export: PlantUML through the private
+  // renderer, Mermaid in the page; anything else stays as fenced source in the page.
+  const renderSiteDiagram: DiagramRenderer = async (diagram: Diagram) => {
+    try {
+      if (diagram.format === "plantuml") return sanitizeSvg(await invoke<string>("render_local_diagram", { content: diagram.content }));
+      if (diagram.format === "mermaid") return sanitizeSvg(await renderMermaidSvg(diagram.content));
+    } catch { /* Kept as fenced source; the status line counts it. */ }
+    return null;
+  };
+
+  async function exportSite() {
+    if (fileBusy) return;
+    fileBusy = true;
+    try {
+      const path = await open({ title: "Choose an empty folder for the documentation site", directory: true, multiple: false });
+      if (!path || typeof path !== "string") return;
+      const snapshot: Project = $state.snapshot(project);
+      const rendered = await renderDiagrams(snapshot, renderSiteDiagram);
+      const { files, stats } = buildSite(snapshot, { projectName: snapshot.name, date: today() }, rendered);
+      await invoke("export_site", { path, files });
+      const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+      status = `Exported ${plural(stats.documents, "document")} to ${path} — ${plural(stats.diagramsRendered, "diagram")} as SVG, `
+        + `${plural(stats.diagramsAsSource, "diagram")} as source${dirty ? " (unsaved edits included)" : ""}`;
+    } catch (error) { status = `Site export failed: ${error}`; }
     finally { fileBusy = false; }
   }
 
@@ -491,11 +531,8 @@
   <Sidebar
     selectedTemplate={activeTab.template}
     selectedLanguage={activeTab.language}
-    sections={activeTab.sections}
-    onTemplateChange={(tmpl: string) => setTemplate(tmpl)}
+    onApplyTemplate={applyTemplate}
     onLanguageChange={(l: string) => setLanguage(l)}
-    onSectionsChange={setSections}
-    {beginUpdate}
   />
   <div class="main">
     <div class="project-bar">
@@ -505,13 +542,17 @@
       <button disabled={fileBusy} onclick={() => openProject()}>Open project</button>
       <button disabled={fileBusy} onclick={() => saveProject()}>Save project</button>
       <button disabled={fileBusy} onclick={() => saveProject(true)}>Save as…</button>
+      <button disabled={fileBusy} onclick={exportSite} title="Publish every document as a Markdown site (DocFX / MkDocs / Azure DevOps wiki / GitHub)">Export site…</button>
       <button disabled={fileBusy} onclick={() => openProject(true)} title="Open a project saved by an older ArchGen as a single .archgen file">Import .archgen</button>
     </div>
     <div class="history-bar">
       <button disabled={fileBusy || !undoHistory.past.length} onclick={() => undoRedo("undo")} title={undoHistory.past.at(-1)?.label}>Undo</button>
       <button disabled={fileBusy || !undoHistory.future.length} onclick={() => undoRedo("redo")} title={undoHistory.future.at(-1)?.label}>Redo</button>
       <button disabled={fileBusy || !projectPath} onclick={() => loadHistory()}>Git history</button>
-      <span>Undo/Redo: current session · Git history: commits of the project folder</span>
+      <button disabled={fileBusy} onclick={() => releaseNotesOpen = true}>Release notes…</button>
+      <span class="spacer"></span>
+      <GitStatusBar {projectPath} projectId={project.id} projectName={project.name} fingerprint={savedFingerprint}
+        {dirty} busy={fileBusy || syncing > 0} onStatus={(message: string) => status = message} />
     </div>
     {#if status}<div class="project-status" role="status">{status}</div>{/if}
     <div class="pending-results">
@@ -560,13 +601,15 @@
       </div>
       <button class="tab-add" onclick={addTab} title="New document">+</button>
     </div>
-    <Toolbar selectedTemplate={activeTab.template} sections={activeTab.sections} />
+    <Toolbar document={activeTab} projectName={project.name} />
     {#key activeTab.id}
     <Canvas
       sections={activeTab.sections}
+      documentName={activeTab.name}
       {isGenerating}
       selectedLanguage={activeTab.language}
       {selection}
+      {aiStatus}
       onSectionsChange={setSections}
       {onGenerate}
       onError={(message: string) => status = message}
@@ -613,13 +656,21 @@
   />
 {/if}
 
+{#if releaseNotesOpen}
+  <ReleaseNotesDialog {projectPath} projectId={project.id} language={activeTab.language} documentName={activeTab.name}
+    onCreateDocument={createReleaseDocument} onInsertSections={insertReleaseSections}
+    onStatus={(message: string) => status = message} onClose={() => releaseNotesOpen = false} />
+{/if}
+
 {#if reviewing}
   <Modal title={`Review changes — ${reviewing.target.name}`} onClose={() => reviewingId = null}>
     <p>The proposal replaces this document's sections, including the diagram source shown below. Nothing changes until you accept.</p>
     {#if reviewing.request.kind === "rework"}
-      <p>AI rework of {reworkTargets(reviewing.request, reviewing.baseDocument)} · {reviewing.request.provider}{reviewing.request.model ? ` (${reviewing.request.model})` : ""}</p>
-      {#if reviewing.summary}<p class="job-summary">{reviewing.summary}</p>{/if}
+      <p>AI rework of {reworkTargets(reviewing.request, reviewing.baseDocument)}{reworkLabel(reviewing.request)}</p>
+    {:else}
+      <p>AI {reviewing.request.kind}{reworkLabel(reviewing.request)}</p>
     {/if}
+    {#if reviewing.summary}<p class="job-summary">{reviewing.summary}</p>{/if}
     {#if !reviewCompatible}
       <p class="conflict" role="alert">The original document changed or closed. Acceptance is blocked. Recover as a new document to keep this result.</p>
       <details><summary>Current document source</summary><pre class="current-source">{project.documents.find(d => d.id === reviewing!.target.documentId)?.sections.map(sectionSource).join("\n\n") ?? "Document is no longer open in this project."}</pre></details>
@@ -668,7 +719,8 @@
 <style>
   .runtime-error { position: fixed; top: 0; left: 0; right: 0; z-index: 10; padding: 16px; background: var(--bg-secondary); color: var(--text-primary); }
   .history-bar { display: flex; align-items: center; gap: 8px; padding: 8px 20px; background: var(--bg-secondary); }
-  .history-bar span { font-size: 12px; color: var(--text-muted); }
+  .history-bar { flex-wrap: wrap; }
+  .history-bar .spacer { flex: 1; }
   .history-bar button, .review-actions button, .revision-list button { padding: 7px 12px; color: var(--text-primary); background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; }
   .review-actions { display: flex; gap: 10px; position: sticky; bottom: -20px; padding: 16px 0; background: var(--bg-secondary); }
   .revision-list { display: flex; flex-wrap: wrap; gap: 8px; max-height: 180px; overflow-y: auto; }

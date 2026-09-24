@@ -209,7 +209,7 @@ fn fold(c: char) -> &'static str {
 }
 
 /// ASCII, lowercase and short: identical on every filesystem and in every Git client.
-fn slug(text: &str, fallback: &str) -> String {
+pub(crate) fn slug(text: &str, fallback: &str) -> String {
     let mut out = String::new();
     for c in text.to_lowercase().chars() {
         if c.is_ascii_alphanumeric() {
@@ -262,14 +262,26 @@ fn extension(format: &str) -> &'static str {
     }
 }
 
+/// `CON.md`, `nul.txt`, `COM1.puml`: on Windows these open a device, not a file,
+/// whatever the extension. Generated names never are one (see `slug`).
+fn windows_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or_default().trim_end().to_ascii_lowercase();
+    matches!(stem.as_str(), "con" | "prn" | "aux" | "nul")
+        || (stem.len() == 4
+            && (stem.starts_with("com") || stem.starts_with("lpt"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+}
+
 /// Manifests come from cloned repositories: a name is one ordinary path component.
-fn safe_name(name: &str) -> Result<&str, String> {
+pub(crate) fn safe_name(name: &str) -> Result<&str, String> {
     let unsafe_name = name.is_empty()
         || name == "."
         || name == ".."
         || name.len() > 200
         || name.starts_with(' ')
         || name.ends_with([' ', '.'])
+        // Only refused where it is a device: elsewhere such a hand-written file still opens.
+        || (cfg!(windows) && windows_device_name(name))
         || name
             .chars()
             .any(|c| c.is_control() || r#"/\:*?"<>|"#.contains(c));
@@ -305,7 +317,7 @@ impl Source for Folder<'_> {
     }
 }
 
-fn git(root: &Path) -> Command {
+pub(crate) fn git(root: &Path) -> Command {
     let mut command = Command::new("git");
     command
         .arg("-C")
@@ -319,7 +331,7 @@ fn git(root: &Path) -> Command {
     command
 }
 
-fn git_error(error: impl std::fmt::Display) -> String {
+pub(crate) fn git_error(error: impl std::fmt::Display) -> String {
     format!("Git is needed for project history and could not be started: {error}")
 }
 
@@ -582,7 +594,7 @@ fn plan(project: &Project) -> Result<Vec<(String, String)>, String> {
     Ok(content)
 }
 
-fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
     let parent = path.parent().ok_or("Invalid project path.")?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let mut name = path.file_name().ok_or("Invalid project path.")?.to_owned();
@@ -649,6 +661,12 @@ fn save(root: &Path, project: &Project, expected: Option<&str>) -> Result<String
     Ok(load_from(Folder(root))?.fingerprint)
 }
 
+/// Writes a new project folder for other modules' tests and returns its fingerprint.
+#[cfg(test)]
+pub(crate) fn save_for_tests(root: &Path, project: &Project) -> String {
+    save(root, project, None).unwrap()
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadedProject {
@@ -700,7 +718,7 @@ pub struct HistoryEntry {
     summary: String,
 }
 
-fn ensure_project(root: &Path, project_id: &str) -> Result<(), String> {
+pub(crate) fn ensure_project(root: &Path, project_id: &str) -> Result<(), String> {
     let mut reader = Reader {
         source: Folder(root),
         budget: MAX_PAYLOAD,
@@ -711,6 +729,16 @@ fn ensure_project(root: &Path, project_id: &str) -> Result<(), String> {
         return Err("This history belongs to another project.".into());
     }
     Ok(())
+}
+
+/// The fingerprint of what is on disk now, for a check that the folder still
+/// holds exactly the content the user last opened or saved (see `git::commit`).
+pub(crate) fn disk_fingerprint(root: &Path, project_id: &str) -> Result<String, String> {
+    let loaded = load_from(Folder(root))?;
+    if loaded.project.id != project_id {
+        return Err("This folder holds another project.".into());
+    }
+    Ok(loaded.fingerprint)
 }
 
 fn history(root: &Path, project_id: &str, skip: usize) -> Result<Vec<HistoryEntry>, String> {
@@ -940,6 +968,21 @@ mod tests {
         project.documents[0].sections[0].id = "doc".into();
         assert!(save(&dir.0, &project, None).is_err());
         assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn windows_device_names_are_recognized_with_any_extension() {
+        for name in ["con", "CON.md", "nul.txt", "Aux.puml", "com1.md", "LPT9", "prn .md"] {
+            assert!(windows_device_name(name), "{name}");
+        }
+        for name in ["console.md", "com10.md", "com0.md", "icon.md", "null.md", "lpt.md", "con-section.md"] {
+            assert!(!windows_device_name(name), "{name}");
+        }
+        // Every generated name stays clear of them.
+        for title in ["CON", "nul", "COM1", "lpt9"] {
+            assert!(!windows_device_name(&format!("{}.md", slug(title, "section"))), "{title}");
+        }
+        assert_eq!(safe_name("CON.md").is_err(), cfg!(windows));
     }
 
     #[test]

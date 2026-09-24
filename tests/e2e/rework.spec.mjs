@@ -407,11 +407,15 @@ test("the context checkbox does not carry over from one document to another", as
   await expect(page.getByRole("checkbox", { name: "Include the rest of the document as read-only context" })).not.toBeChecked();
 });
 
-test("the local-engine hint is shown in Auto mode and hidden once Rework is selected", async ({ page }) => {
+// Docs/Diagram/Auto now run through the same configured provider as Rework
+// (docs/AI-REWORK.md): the provider chip and "AI settings" button are visible in
+// every mode, not only once Rework is clicked.
+test("the provider chip and AI settings button are shown in Auto mode, exactly as in Rework", async ({ page }) => {
   await openThreeSectionFixture(page);
-  await expect(page.getByText("Local Ollama (Python engine)", { exact: true })).toBeVisible();
+  await expect(page.locator(".provider-chip")).toHaveText("Ollama (local) · qwen3.8:27b");
+  await expect(page.getByRole("button", { name: "AI settings", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Rework", exact: true }).click();
-  await expect(page.getByText("Local Ollama (Python engine)", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".provider-chip")).toHaveText("Ollama (local) · qwen3.8:27b");
 });
 
 test("job summary line breaks are preserved (a removal note must not run into the model's prose)", async ({ page }) => {
@@ -778,4 +782,96 @@ test("a whole-document rework armed on one tab is blocked on another and resumes
   expect(request.scope).toBe("document");
   expect(request.sectionIds).toEqual([]);
   expect(request.diagramIds).toEqual([]);
+});
+
+// ── Docs/Diagram/Auto through the configured provider ───────────────────────
+// (docs/AI-REWORK.md: these now carry the same consent, provider/model record,
+// route check and cancellation as Rework, instead of the Python engine.)
+
+test("Docs mode shows the consent sentence for a cloud provider before anything is sent", async ({ page }) => {
+  await openThreeSectionFixture(page);
+  await page.getByRole("button", { name: "Docs", exact: true }).click();
+  await expect(page.locator("#rework-consent")).toHaveText(""); // Ollama is local: nothing to consent to yet
+
+  await page.addInitScript(() => { window.aiStatusOverride = { provider: "anthropic" }; });
+  await page.reload();
+  await page.getByRole("button", { name: "Open project", exact: true }).click();
+  await page.getByRole("button", { name: "Docs", exact: true }).click();
+  await expect(page.locator("#rework-consent")).toHaveText(
+    "Sends the description and the template's section titles and guidance to Anthropic via Claude API.",
+  );
+  await expect(page.locator(".provider-chip")).toHaveText("Claude API · claude-opus-5");
+});
+
+test("Docs mode is blocked with the reason, exactly like Rework, when the configured provider is unavailable", async ({ page }) => {
+  await openThreeSectionFixture(page);
+  await page.addInitScript(() => { window.aiStatusOverride = { provider: "openai" }; });
+  await page.reload();
+  await page.getByRole("button", { name: "Open project", exact: true }).click();
+  await page.getByRole("button", { name: "Docs", exact: true }).click();
+  await page.locator("textarea.prompt-input").fill("Document the payment system.");
+  await expect(page.locator(".rework-blocked")).toContainText("Set an OpenAI API key");
+  await expect(page.getByRole("button", { name: "Generate", exact: true })).toBeDisabled();
+  await page.locator("textarea.prompt-input").press("Enter");
+  expect(await page.evaluate(() => window.calls.some(c => c.command === "create_generation_job"))).toBe(false);
+});
+
+test("a documentation job request carries the chosen template's own section titles and guidance", async ({ page }) => {
+  await page.getByRole("button", { name: "C4 Model Context, Container, Component, Code" }).click();
+  await page.getByRole("button", { name: "Docs", exact: true }).click();
+  await page.locator("textarea.prompt-input").fill("Document the payment system.");
+  await page.getByRole("button", { name: "Generate", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => typeof window.resolveGeneration)).toBe("function");
+  const request = await page.evaluate(() => window.calls.find(c => c.command === "create_generation_job").args.request);
+  expect(request.kind).toBe("documentation");
+  expect(request.provider).toBe("ollama");
+  expect(request.model).toBe("qwen3.8:27b");
+  expect(request.sections.map(s => s.title)).toEqual(["System Context", "Container Diagram", "Component Diagram", "Code / Class Diagram"]);
+  expect(request.sections.every(s => s.guidance.length > 0)).toBe(true);
+});
+
+function dropDiagramChip(page, selector) {
+  return page.evaluate(sel => {
+    const target = document.querySelector(sel);
+    const dt = new DataTransfer();
+    dt.setData("application/json", JSON.stringify({ id: "uml-sequence", label: "Sequence", icon: "↕", type: "uml" }));
+    target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt }));
+  }, selector);
+}
+
+test("dropping a diagram chip with a cloud provider asks for confirmation and sends nothing when declined", async ({ page }) => {
+  await openThreeSectionFixture(page);
+  await page.addInitScript(() => { window.aiStatusOverride = { provider: "anthropic" }; window.confirmResult = false; });
+  await page.reload();
+  await page.getByRole("button", { name: "Open project", exact: true }).click();
+  await expect(page.locator(".section-card").first()).toBeVisible();
+
+  await dropDiagramChip(page, ".section-card");
+  await expect.poll(() => page.evaluate(() => window.calls.some(c => c.command === "plugin:dialog|confirm"))).toBe(true);
+  const confirmCall = await page.evaluate(() => window.calls.find(c => c.command === "plugin:dialog|confirm"));
+  expect(confirmCall.args.message).toContain("Anthropic");
+  expect(confirmCall.args.message).toContain("Claude API");
+  expect(await page.evaluate(() => window.calls.some(c => c.command === "create_generation_job"))).toBe(false);
+});
+
+test("dropping a diagram chip with a cloud provider sends the request once confirmed", async ({ page }) => {
+  await openThreeSectionFixture(page);
+  await page.addInitScript(() => { window.aiStatusOverride = { provider: "anthropic" }; window.confirmResult = true; });
+  await page.reload();
+  await page.getByRole("button", { name: "Open project", exact: true }).click();
+  await expect(page.locator(".section-card").first()).toBeVisible();
+
+  await dropDiagramChip(page, ".section-card");
+  await expect.poll(() => page.evaluate(() => window.calls.some(c => c.command === "create_generation_job"))).toBe(true);
+  const request = await page.evaluate(() => window.calls.find(c => c.command === "create_generation_job").args.request);
+  expect(request.kind).toBe("diagram");
+  expect(request.provider).toBe("anthropic");
+});
+
+test("dropping a diagram chip with the local provider asks for no confirmation", async ({ page }) => {
+  await openThreeSectionFixture(page);
+  await expect(page.locator(".section-card").first()).toBeVisible();
+  await dropDiagramChip(page, ".section-card");
+  await expect.poll(() => page.evaluate(() => window.calls.some(c => c.command === "create_generation_job"))).toBe(true);
+  expect(await page.evaluate(() => window.calls.some(c => c.command === "plugin:dialog|confirm"))).toBe(false);
 });

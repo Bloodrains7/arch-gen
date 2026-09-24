@@ -1595,6 +1595,7 @@ Options:
     }
 
     #[test]
+    #[cfg(windows)]
     fn ensure_empty_dir_fails_closed_when_a_locked_file_survives_the_wipe() {
         use std::os::windows::fs::OpenOptionsExt;
         let root = process::TempDir::new().unwrap();

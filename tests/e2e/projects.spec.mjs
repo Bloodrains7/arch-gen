@@ -186,7 +186,7 @@ test("diagram update targets only the selected diagram and preserves its ID", as
   expect(request.diagramType).toBe("sequence");
   expect(request.diagramId).toBe("second");
   expect(request.sectionId).toBe("s");
-  await page.evaluate(() => window.resolveGeneration({ content: "@startuml\nA -> B: After\n@enduml", diagram_type: "sequence", format: "plantuml" }));
+  await page.evaluate(() => window.resolveGeneration({ summary: "Updated the label.", diagram: { format: "plantuml", content: "@startuml\nA -> B: After\n@enduml" } }));
   await acceptChanges(page);
   await expect(page.getByRole("status")).toContainText("Updated Design");
   await page.getByRole("button", { name: "Save project", exact: true }).click();

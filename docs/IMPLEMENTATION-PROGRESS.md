@@ -109,6 +109,87 @@ Overenie: 215 Rust testov (vrátane reálneho `curl.exe` proti lokálnemu listen
 
 Otvorené: Docs/Diagram zatiaľ nepoužívajú zvoleného providera. Druhá inštancia ArchGen označí pri štarte bežiace úlohy prvej ako prerušené (chýba single-instance ochrana). Mock IPC v e2e je ručný obraz validácie v Ruste a môže sa rozísť. Review a Git history modal nevracajú fokus na otvárajúci prvok (AI settings áno).
 
+## E1, druhý prírastok — Git, release notes a šablóny pre architektúru
+
+Implementované 2026-09-24. Návod: [GIT-A-RELEASE-NOTES.md](GIT-A-RELEASE-NOTES.md); odporúčania
+ďalších krokov: [ZLEPSENIA.md](ZLEPSENIA.md).
+
+- **Git lišta** (`src-tauri/src/git.rs`, `GitStatusBar.svelte`): stav priečinka projektu (vetva,
+  ↑/↓ voči upstreamu, zmeny iba v priečinku projektu), **Commit…** iba priečinka projektu a iba
+  uloženého obsahu (kontrola odtlačku ako pri ukladaní; inde stagnuté súbory sa nepribalia),
+  **Push** aktuálnej vetvy do jej upstreamu po potvrdení, bez force, s limitom 180 s a bez
+  interaktívnych promptov. Doterajšia zásada „ArchGen sám necommituje" platí ďalej: commit
+  a push sú iba výslovné akcie.
+- **Release notes z Gitu** (`ReleaseNotesDialog.svelte`, `src/lib/release-notes.ts`): tagy
+  a vetvy ľubovoľného repozitára, rozsah commitov (revízie overené cez `rev-parse
+  --end-of-options`, nikdy ako voľba alebo rozsah; filter podpriečinka s literal pathspecs),
+  parser Conventional Commits (typ, scope, `!`, `BREAKING CHANGE`, issues), šablóny v Markdowne
+  s hlavičkou skupín a Mustache podmnožinou, tri vstavané šablóny (Keep a Changelog, technická,
+  zákaznícka SK), projektové šablóny v `templates/release-notes/`. Výsledok sa vloží ako nový
+  dokument alebo navrch aktuálneho (Undo), uloží do súboru alebo skopíruje. Breaking change
+  šablóna nikdy neskryje; zmena rozsahu po načítaní zablokuje vloženie.
+- **Šablóny dokumentov** (`src/lib/templates.ts`): k arc42/C4/TOGAF pribudli Solution Design,
+  Decision Record (ADR, MADR), Well-Architected Review a Release Notes, každá sekcia s krátkym
+  návodom ako HTML komentár. Python engine má rovnaké sekcie (test kontroluje zhodu).
+- **Oprava straty obsahu**: klik na šablónu predtým nahradil všetky sekcie dokumentu prázdnymi.
+  Teraz sa pridá štruktúra, sekcie so zhodným názvom si nechajú obsah a ID, ostatné sekcie
+  s obsahom zostanú za šablónou; zmiznú iba prázdne. Jedna zmena = jeden krok Undo.
+- **Exporty**: Markdown s YAML front matter (title, project, template, language, date) a názvom
+  dokumentu namiesto „ARC42 Architecture Documentation"; HTML cez `marked` + DOMPurify namiesto
+  vlastného regex prevodu, s obsahom a PlantUML diagramami vykreslenými lokálnym rendererom
+  (čo sa vykresliť nedá, zostane ako zdroj a stav to povie). Visio/EA exporty už nehlásia úspech:
+  backend vráti chybu „not implemented", tlačidlá sú neaktívne; neaktívne tlačidlá exportu
+  v bočnom paneli boli odstránené. Náhľad dokumentu má názov dokumentu. Nový blok „Decision (ADR)"
+  medzi Dev Tasks.
+- Odstránený nepoužívaný príkaz `get_template`; test viazaný na Windows API (`share_mode`) je
+  označený `#[cfg(windows)]`, takže sa testy dajú preložiť aj mimo Windows.
+
+Overenie: Rust 204 testov na Linuxe (+6 nových pre Git a šablóny; 7 testov DPAPI/Windows ciest sa
+na Linuxe spustiť nedá, zlyhávajú rovnako ako pred zmenou), 52 JS testov (+13), 55 UI testov
+s mockovaným IPC (+5), 11 Python testov, typová kontrola bez chýb (5 existujúcich CSS warnings).
+Na Windows ani v desktopovej aplikácii s reálnym Tauri IPC tento prírastok zatiaľ overený nebol.
+
+## E1, tretí prírastok — C4, Mermaid, jeden AI provider a export webu
+
+Implementované 2026-09-24, štyri kroky z [ZLEPSENIA.md](ZLEPSENIA.md) (P1). Každý robil
+samostatný agent v izolovanom git worktree; výsledky boli skontrolované, zlúčené a otestované
+spolu. Pri kontrole pribudli dve opravy (nižšie).
+
+- **C4 v lokálnom rendereri** (`renderer.rs`): povolené presne C4 stdlib include
+  (`!include <C4/C4_Context>` a ďalšie), porovnanie po trim bez ohľadu na veľkosť písmen,
+  do rendereru ide vždy kanonický zápis; všetky ostatné direktívy zostávajú zakázané. Overené so
+  skutočným `plantuml.jar` 1.2026.8 (SHA-256 podľa pinu) a argumentmi rendereru vrátane SANDBOX.
+  Python engine má C4 príklady. Pozri [RUNTIME-DISTRIBUTION.md](RUNTIME-DISTRIBUTION.md).
+- **Lokálny Mermaid** (`src/lib/mermaid.ts`, [DIAGRAMY.md](DIAGRAMY.md)): mermaid 12.0.0 načítaný
+  lenivo mimo hlavného balíka, `securityLevel: "strict"`, textové popisky, sériové vykresľovanie,
+  automatický náhľad s ochranou pred zastaraným výsledkom, vloženie do HTML aj site exportu.
+  Štýly Mermaid sa prepíšu do atribútov, aby diagram po sanitizácii zostal čitateľný.
+  - *Oprava z kontroly:* direktíva `%%{init: {"themeCSS": "… url(https://…)"}}%%` spustila
+    sieťovú požiadavku (zdroj diagramu môže pochádzať z cudzieho repozitára). Náhľad teraz takéto
+    direktívy, `config:` v hlavičke a štýly s `url(`, `\` či `@` odmieta s jasnou správou a
+    Mermaid má `secure` kľúče; e2e overuje päť variantov bez jedinej požiadavky von.
+  - *Oprava z kontroly:* sanitizér ponecháva odkazy `url(#id)` v rámci toho istého SVG, takže
+    hrany majú znova šípky; každé iné `url()` (aj cez CSS escape) odstráni.
+- **Docs/Diagram cez nakonfigurovaného providera** (`ai/generate.rs`, [AI-REWORK.md](AI-REWORK.md)):
+  rovnaká cesta ako Rework – provider a model zaznamenané v úlohe a overené pred volaním,
+  veta o príjemcovi pred odoslaním vo všetkých režimoch, potvrdenie pri pretiahnutí diagramu na
+  cloudového providera, zrušenie ukončí proces providera, výsledok ide cez Review changes.
+  Dokumentácia generuje presne sekcie šablóny (názvy aj návody z `templates.ts`), ID prideľuje
+  aplikácia. Úloha bez providera zlyhá, nikdy potichu nepoužije iný engine. Python engine sa na
+  generovanie už nepoužíva ([AI-PROVIDER.md](AI-PROVIDER.md)).
+- **Export webu** (`site-export.ts`, `site.rs`, [EXPORT.md](EXPORT.md)): **Export site…** zapíše
+  do nového alebo prázdneho priečinka `index.md`, stránku na dokument s front matter, diagramy ako
+  sanitizované SVG, `toc.yml` (DocFX / Microsoft Learn) a `mkdocs.yml`. Rust overí každú cestu
+  pred zápisom (žiadne `..`, absolútne cesty, kolízie bez ohľadu na veľkosť písmen, limity).
+- `project::safe_name` vo Windows odmieta názvy zariadení (`CON.md`, `COM1.puml`) – chráni
+  manifesty z cudzích repozitárov, šablóny aj export.
+
+Overenie po zlúčení všetkých krokov: Rust 234 testov (+30; 7 testov DPAPI/Windows ciest sa na
+Linuxe spustiť nedá), 73 JS (+21), 70 UI testov s mockovaným IPC (+15), 12 Python, typová kontrola
+bez chýb (5 existujúcich CSS warnings), produkčný build. Hlavný balík narástol o ~3 kB; Mermaid
+je samostatný chunk. Žiadny živý AI provider ani desktopová aplikácia s reálnym Tauri IPC
+(WebView2) v tomto prírastku overené neboli.
+
 ## Čo ešte nie je dokončené z E0
 
 Nejde o dokončenie celej etapy. Ukladanie je explicitné, bez autosave a automatického otvorenia posledného projektu. História sú Git commity, nie každé uloženie. Neprijaté AI výsledky zostávajú v lokálnom registri, nie v priečinku projektu.

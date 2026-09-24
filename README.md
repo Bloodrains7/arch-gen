@@ -1,34 +1,49 @@
 # ArchGen (Architecture & Diagram Generator)
 
-A Rust-based tool for generating, visualizing, and validating UML, BPMN, and Archimate diagrams, with AI-driven workflows powered by LangGraph and DSPy.
+A desktop tool (Tauri 2 + Svelte 5 + Rust) for architecture documentation
+and design: templates, Markdown sections, PlantUML/Mermaid diagrams, AI assistance with review before
+anything changes, Git integration and release notes.
 
 ## Features
-- **AI-Driven Generation:** Utilizes LangGraph for agentic diagram reasoning and DSPy for optimized prompt/logic generation.
-- **Multi-Format Support:**
-  - UML (Class, Sequence, State, etc.)
-  - BPMN (Business Process Model and Notation)
-  - Archimate (Enterprise Architecture)
-- **Visualisation & Integration:**
-  - Native integration with **Microsoft Visio** (via COM).
-  - Native integration with **Sparx Enterprise Architect (EA)** (via COM).
-  - Export to Mermaid/PlantUML for quick previews.
-- **Documentation:** Automatic generation and validation of architectural documentation against the diagrams.
+- **Documentation templates** with guidance per section: arc42, C4, TOGAF, Solution Design (structured
+  along the Azure Well-Architected pillars), Decision Record (ADR, MADR), Well-Architected Review and
+  Release Notes. Applying a template adds its structure and never discards content you wrote.
+- **Diagrams**: PlantUML and Mermaid sources per section. PlantUML renders with a private local
+  renderer (no upload), including C4 diagrams through the bundled C4 standard library
+  (`!include <C4/C4_Container>`); Mermaid renders offline inside the app. SVG output is sanitized,
+  and the public PlantUML server is used only on an explicit click. See [docs/DIAGRAMY.md](docs/DIAGRAMY.md).
+- **AI**: generate documentation or diagrams, and rework selected blocks, with the provider chosen in
+  AI settings — local Ollama, OpenAI / Gemini / Anthropic APIs, or the Claude, Codex and Gemini CLIs.
+  The app names who receives the content before sending, and every result is a proposal you review;
+  see [docs/AI-REWORK.md](docs/AI-REWORK.md).
+- **Git**: projects are plain files in a folder ([docs/PROJECT-FORMAT.md](docs/PROJECT-FORMAT.md)); the
+  app shows the Git status of the project folder, browses and restores its history, commits only the
+  project folder and pushes the current branch on request.
+- **Release notes from Git**: pick a repository and a commit range (tags, branches), choose a template
+  (Keep a Changelog, technical, Slovak customer notes, or your own Markdown template shared in the
+  project), and insert the result as a document or save it as a file; see
+  [docs/GIT-A-RELEASE-NOTES.md](docs/GIT-A-RELEASE-NOTES.md).
+- **Export**: Markdown with front matter (title, project, template, language, date), a
+  self-contained HTML page (opens in Word, prints to PDF) with locally rendered diagrams, and the
+  whole project as a docs-as-code site (`index.md`, one page per document, SVG diagrams, `toc.yml`
+  for DocFX / Microsoft Learn and `mkdocs.yml`); see [docs/EXPORT.md](docs/EXPORT.md).
+- Microsoft Visio and Sparx Enterprise Architect exports are **planned, not implemented**; the buttons
+  are disabled and the backend reports that nothing was exported.
 
-## Working with a project
-- A project is a **folder of plain files** (Markdown sections, `.puml`/`.mmd` diagrams, small JSON
-  manifests) meant to live in Git: see [docs/PROJECT-FORMAT.md](docs/PROJECT-FORMAT.md).
-- **AI rework of selected blocks**: tick sections or diagrams, write an instruction, and review the
-  proposal before anything changes. Providers: local Ollama, OpenAI / Gemini / Anthropic APIs, or the
-  Claude, Codex and Gemini CLIs with their own login. The UI says who receives the content before it
-  is sent; API keys are stored with Windows DPAPI outside the project folder. See
-  [docs/AI-REWORK.md](docs/AI-REWORK.md).
+## Documentation
+- [docs/PRODUCT-DESIGN.md](docs/PRODUCT-DESIGN.md) – product design and roadmap (Slovak)
+- [docs/IMPLEMENTATION-PROGRESS.md](docs/IMPLEMENTATION-PROGRESS.md) – what is implemented and verified
+- [docs/ZLEPSENIA.md](docs/ZLEPSENIA.md) – review and prioritised next improvements
+- [docs/RUNTIME-DISTRIBUTION.md](docs/RUNTIME-DISTRIBUTION.md) – portable Windows build, private Python and renderer
 
 ## Architecture
-The project uses a hybrid approach:
-1. **Rust Core:** Manages the CLI, file system, and native Windows COM interfaces for Visio and EA.
-2. **Python Engine:** Runs LangGraph and DSPy for complex AI workflows, bridged via pyo3.
+1. **Svelte frontend** (`src/`): editor, templates, review dialogs; pure domain logic in `src/lib/*.ts`.
+2. **Rust core** (`src-tauri/`): project files, edit sessions and jobs (SQLite registry), Git, local
+   renderer, AI providers.
+3. **Python engine** (`python-engine/`): the former LangGraph + DSPy generation through PyO3; generation
+   now goes through the Rust provider layer, and the engine is kept for the portable build's runtime check.
 
-## Prerequisites
-- Rust (latest stable)
-- Python 3.9+ (with langgraph, dspy-ai, pydantic)
-- Microsoft Visio / Enterprise Architect (for native visualization)
+## Development
+- Prerequisites: Node 22, Rust stable, Python 3 (dev build), Git; Windows is the target platform.
+- `npm run tauri dev` – desktop app; `npm run dev` – frontend only (no native commands).
+- `npm test`, `npm run check`, `npm run test:e2e` (mocked IPC), `cargo test --manifest-path src-tauri/Cargo.toml`.

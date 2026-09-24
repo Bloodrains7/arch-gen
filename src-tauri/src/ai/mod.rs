@@ -9,6 +9,7 @@
 //! Nothing here needs a new crate: HTTP goes through the system `curl.exe`, with
 //! the API key on curl's stdin config, never on a command line or in a file.
 mod cli;
+pub mod generate;
 mod http;
 pub mod process;
 pub mod rework;
