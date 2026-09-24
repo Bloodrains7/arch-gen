@@ -6,6 +6,7 @@
   import DOMPurify from "dompurify";
   import { buildHtml, buildMarkdown, exportFileName } from "../export";
   import { localSvgUrl } from "../local-svg";
+  import { renderMermaidSvg } from "../mermaid";
   import type { ProjectDocument } from "../project";
 
   let { document, projectName = "" }: { document: ProjectDocument; projectName?: string } = $props();
@@ -34,7 +35,8 @@
   }
 
   // PlantUML diagrams are rendered by the private local renderer (nothing is uploaded);
-  // anything it cannot render stays as source in the page, and the status says so.
+  // Mermaid is rendered locally in-process (nothing is uploaded either). Anything that
+  // cannot be rendered stays as source in the page, and the status says so.
   async function exportHTML() {
     const path = await save({ title: "Export HTML (Word / PDF)", defaultPath: exportFileName(document.name, "html"), filters: [{ name: "HTML", extensions: ["html"] }] });
     if (!path) return;
@@ -43,9 +45,13 @@
     let asSource = 0;
     try {
       for (const diagram of document.sections.flatMap(section => section.diagrams)) {
-        if (diagram.format !== "plantuml" || !diagram.id) { asSource++; continue; }
-        try { images[diagram.id] = localSvgUrl(await invoke<string>("render_local_diagram", { content: diagram.content })); }
-        catch { asSource++; }
+        if (!diagram.id || (diagram.format !== "plantuml" && diagram.format !== "mermaid")) { asSource++; continue; }
+        try {
+          const svg = diagram.format === "plantuml"
+            ? await invoke<string>("render_local_diagram", { content: diagram.content })
+            : await renderMermaidSvg(diagram.content);
+          images[diagram.id] = localSvgUrl(svg);
+        } catch { asSource++; }
       }
       await writeTextFile(path, buildHtml(document, { projectName, date: today() }, renderMarkdown, images));
       show(`Saved to ${path}${asSource ? ` — ${asSource} diagram${asSource === 1 ? "" : "s"} included as source (not renderable locally)` : ""}`, 8000);
@@ -69,7 +75,7 @@
     <div class="btn-group">
       <span class="btn-group-label">Export</span>
       <button class="toolbar-btn" onclick={exportMarkdown} title="Markdown with front matter (title, project, template, language, date)">.md</button>
-      <button class="toolbar-btn" disabled={exporting} onclick={exportHTML} title="Self-contained page; PlantUML diagrams rendered locally">{exporting ? "Rendering…" : ".html / Word"}</button>
+      <button class="toolbar-btn" disabled={exporting} onclick={exportHTML} title="Self-contained page; PlantUML and Mermaid diagrams rendered locally">{exporting ? "Rendering…" : ".html / Word"}</button>
     </div>
     <div class="btn-group">
       <span class="btn-group-label">Diagrams</span>

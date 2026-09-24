@@ -2,6 +2,7 @@
   import plantumlEncoder from "plantuml-encoder";
   import { invoke } from "@tauri-apps/api/core";
   import { localSvgUrl } from "../local-svg";
+  import { renderMermaidSvg } from "../mermaid";
 
   let { content = "", format = "plantuml" } = $props();
   let showCode = $state(false);
@@ -12,17 +13,39 @@
   let rendering = $state(false);
   let request = 0;
 
-  // Reset state when content changes
+  const MERMAID_DEBOUNCE_MS = 400;
+
+  // Mermaid is local and uploads nothing, so it renders automatically (debounced) —
+  // unlike PlantUML, which stays an explicit action. Reset state when content changes,
+  // and (re-)schedule a debounced render for Mermaid; a token guards every async result
+  // below so a stale render for earlier content can never overwrite a newer one.
   $effect(() => {
     content;  // track
     format;
     request++;
+    const token = request;
     localUrl = "";
     rendering = false;
     error = "";
     imgLoaded = false;
     allowRemote = false;
+    if (format !== "mermaid") return;
+    const source = content;
+    const timer = setTimeout(() => renderMermaid(token, source), MERMAID_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
   });
+
+  async function renderMermaid(token: number, source: string) {
+    rendering = true;
+    try {
+      const svg = await renderMermaidSvg(source);
+      if (token === request) localUrl = localSvgUrl(svg);
+    } catch (err) {
+      if (token === request) error = err instanceof Error ? err.message : String(err);
+    } finally {
+      if (token === request) rendering = false;
+    }
+  }
 
   // Convert VARCHAR(100) -> VARCHAR[100] for PlantUML rendering only
   // PlantUML treats () as method signatures, hide methods then hides these fields
@@ -51,7 +74,7 @@
   }
 
   function handleImgError() {
-    error = "Failed to render diagram. Check PlantUML syntax.";
+    error = format === "mermaid" ? "Failed to render diagram." : "Failed to render diagram. Check PlantUML syntax.";
     imgLoaded = false;
   }
 
@@ -63,7 +86,7 @@
 
 <div class="puml-preview">
   <div class="puml-toolbar">
-    <span class="puml-label">PlantUML Diagram</span>
+    <span class="puml-label">{format === "mermaid" ? "Mermaid Diagram" : "PlantUML Diagram"}</span>
     <div class="puml-actions">
       <button
         class="puml-btn"
@@ -102,11 +125,23 @@
       {/if}
       <img
         src={displayUrl}
-        alt="PlantUML Diagram"
+        alt={format === "mermaid" ? "Mermaid Diagram" : "PlantUML Diagram"}
         onload={handleImgLoad}
         onerror={handleImgError}
         class:hidden={!imgLoaded}
       />
+    </div>
+  {:else if format === "mermaid" && error}
+    <div class="puml-render">
+      <div class="puml-error" role="alert">{error}</div>
+    </div>
+    <pre class="puml-code">{content}</pre>
+  {:else if format === "mermaid"}
+    <div class="puml-render loading">
+      <div class="puml-loading">
+        <div class="spinner"></div>
+        <span>Rendering diagram...</span>
+      </div>
     </div>
   {:else}
     <pre class="puml-code">{content}</pre>

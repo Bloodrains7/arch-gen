@@ -98,6 +98,17 @@ test("HTML export escapes names, embeds only SVG data images and keeps other dia
   assert.match(html, /<h2 id="section-1">Context<\/h2>\n<p>22<\/p>/);
 });
 
+test("HTML export embeds a rendered Mermaid diagram exactly like a rendered PlantUML one", () => {
+  // buildHtml() itself does not know or care which renderer produced an SVG (Toolbar.svelte
+  // picks render_local_diagram or renderMermaidSvg by diagram.format before calling it);
+  // it only ever looks at `images`, so a mermaid diagram embeds the same way a plantuml one does.
+  const html = buildHtml(document, { projectName: "Billing", date: "2026-09-24" }, () => "",
+    { g1: "data:image/svg+xml;charset=utf-8,%3Csvg%3EA%3C/svg%3E", g2: "data:image/svg+xml;charset=utf-8,%3Csvg%3EB%3C/svg%3E" });
+  assert.match(html, /<figure><img src="data:image\/svg\+xml;charset=utf-8,%3Csvg%3EA%3C\/svg%3E" alt="sequence diagram"><figcaption>sequence diagram<\/figcaption><\/figure>/);
+  assert.match(html, /<figure><img src="data:image\/svg\+xml;charset=utf-8,%3Csvg%3EB%3C\/svg%3E" alt="flow diagram"><figcaption>flow diagram<\/figcaption><\/figure>/);
+  assert.doesNotMatch(html, /mermaid source/);
+});
+
 test("Git status summary and the default release range", () => {
   const status = { root: "/r", branch: "main", head: "abc1234def", upstream: "origin/main", ahead: 2, behind: 1, changes: [{ path: "a.md", status: "modified" }], truncated: false };
   assert.equal(statusSummary(status), "main · ↑2 ↓1 · 1 change");
