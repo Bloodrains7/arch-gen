@@ -251,7 +251,12 @@ export function installIpcMock(fixtures) {
       // like the backend it refuses a save over content it did not hand out (fingerprint).
       const commitId = index => (index + 1).toString(16).padEnd(40, "0");
       const fingerprint = project => `fp-${JSON.stringify(project).length}-${project.revision}`;
-      if (command === "plugin:dialog|open") return args.options?.directory ? "fixture-project" : "legacy.archgen";
+      // window.directoryPickResult overrides a folder pick (e.g. to null, for "dialog cancelled"),
+      // the same escape-hatch pattern as window.confirmResult / window.loadFixture below.
+      if (command === "plugin:dialog|open") {
+        if (args.options?.directory) return "directoryPickResult" in window ? window.directoryPickResult : "fixture-project";
+        return "legacy.archgen";
+      }
       if (command === "save_project") {
         const stored = localStorage.getItem("test-saved-project");
         if (args.expectedFingerprint != null && (!stored || fingerprint(JSON.parse(stored)) !== args.expectedFingerprint)) throw new Error("Project changed on disk");
@@ -324,6 +329,14 @@ export function installIpcMock(fixtures) {
         const file = `${args.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
         window.releaseTemplates = [...(window.releaseTemplates ?? []).filter(t => t.file !== file), { file, content: args.content, error: null }];
         return file;
+      }
+      // site.rs: records the exported files for the test to inspect (window.exportedSite)
+      // instead of writing to a real filesystem.
+      if (command === "export_site") {
+        noUnknownArgs(args, ["path", "files"]);
+        if (window.exportSiteFailure) throw new Error(window.exportSiteFailure);
+        window.exportedSite = { path: args.path, files: clone(args.files) };
+        return { path: args.path, files: args.files.length, bytes: args.files.reduce((n, f) => n + f.content.length, 0) };
       }
       throw new Error(`Unexpected IPC: ${command}`);
     },

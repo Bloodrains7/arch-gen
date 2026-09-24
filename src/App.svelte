@@ -14,7 +14,10 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { createProject, createDocument, updateDocument, normalizeSections, parseProject, emptyHistory, recordChange, moveHistory, restoreSnapshot, sectionSource } from "./lib/project";
   import { applyTemplateStructure, findTemplate, isBlankSection } from "./lib/templates";
-  import type { Project, ProjectDocument, Section } from "./lib/project";
+  import type { Diagram, Project, ProjectDocument, Section } from "./lib/project";
+  import { buildSite, renderDiagrams } from "./lib/site-export";
+  import type { DiagramRenderer } from "./lib/site-export";
+  import { sanitizeSvg } from "./lib/local-svg";
   import { EditSession, jobCompatible } from "./lib/runtime";
   import type { GenerationJob, GenerationRequest } from "./lib/runtime";
   import { fetchAiStatus } from "./lib/ai";
@@ -383,6 +386,35 @@
     finally { fileBusy = false; }
   }
 
+  const today = () => new Date().toLocaleDateString("sv-SE");
+
+  // Exports the project as it is now, unsaved edits included (dirty says so in the status
+  // line). PlantUML renders locally through the same private renderer Toolbar's HTML export
+  // uses; this is the one place another local renderer (Mermaid) gets plugged in later —
+  // everything else stays as fenced source in the page, exactly like the single-document export.
+  const renderSiteDiagram: DiagramRenderer = async (diagram: Diagram) => {
+    if (diagram.format !== "plantuml") return null;
+    try { return sanitizeSvg(await invoke<string>("render_local_diagram", { content: diagram.content })); }
+    catch { return null; }
+  };
+
+  async function exportSite() {
+    if (fileBusy) return;
+    fileBusy = true;
+    try {
+      const path = await open({ title: "Choose an empty folder for the documentation site", directory: true, multiple: false });
+      if (!path || typeof path !== "string") return;
+      const snapshot: Project = $state.snapshot(project);
+      const rendered = await renderDiagrams(snapshot, renderSiteDiagram);
+      const { files, stats } = buildSite(snapshot, { projectName: snapshot.name, date: today() }, rendered);
+      await invoke("export_site", { path, files });
+      const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+      status = `Exported ${plural(stats.documents, "document")} to ${path} — ${plural(stats.diagramsRendered, "diagram")} as SVG, `
+        + `${plural(stats.diagramsAsSource, "diagram")} as source${dirty ? " (unsaved edits included)" : ""}`;
+    } catch (error) { status = `Site export failed: ${error}`; }
+    finally { fileBusy = false; }
+  }
+
   async function openProject(legacy = false) {
     if (fileBusy) return;
     fileBusy = true;
@@ -506,6 +538,7 @@
       <button disabled={fileBusy} onclick={() => openProject()}>Open project</button>
       <button disabled={fileBusy} onclick={() => saveProject()}>Save project</button>
       <button disabled={fileBusy} onclick={() => saveProject(true)}>Save as…</button>
+      <button disabled={fileBusy} onclick={exportSite} title="Publish every document as a Markdown site (DocFX / MkDocs / Azure DevOps wiki / GitHub)">Export site…</button>
       <button disabled={fileBusy} onclick={() => openProject(true)} title="Open a project saved by an older ArchGen as a single .archgen file">Import .archgen</button>
     </div>
     <div class="history-bar">

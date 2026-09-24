@@ -1,6 +1,6 @@
 // Markdown and HTML exports of one document. Pure functions: the caller supplies
 // the Markdown renderer (marked + DOMPurify in the app) and any diagram images.
-import type { ProjectDocument } from "./project";
+import type { Diagram, ProjectDocument } from "./project";
 
 export interface ExportMeta {
   projectName: string;
@@ -8,34 +8,54 @@ export interface ExportMeta {
   date: string;
 }
 
-/** A file name that works on every filesystem: "Architektúra – Billing" → "architektura-billing". */
-export function exportFileName(name: string, extension: string): string {
+/** A name that works on every filesystem: "Architektúra – Billing" → "architektura-billing". */
+export function slugify(name: string, fallback = "document"): string {
   const stem = name.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
     .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60).replace(/-+$/, "");
-  return `${stem || "document"}.${extension}`;
+  return stem || fallback;
 }
 
-// A JSON string is a valid double-quoted YAML scalar.
-const yaml = (value: string) => JSON.stringify(value);
+export function exportFileName(name: string, extension: string): string {
+  return `${slugify(name)}.${extension}`;
+}
+
+// A JSON string is a valid double-quoted YAML (and Markdown-front-matter) scalar.
+export const yamlScalar = (value: string) => JSON.stringify(value);
+
+/** YAML front matter (title, project, template, language, date), shared by the single-document
+ * Markdown export and each page of the site export. */
+export function frontMatter(document: ProjectDocument, meta: ExportMeta): string {
+  return `---\ntitle: ${yamlScalar(document.name)}\nproject: ${yamlScalar(meta.projectName)}\ntemplate: ${yamlScalar(document.template)}\nlanguage: ${yamlScalar(document.language)}\ndate: ${meta.date}\n---`;
+}
+
+/** Resolves a diagram to a relative image path to embed instead of its source; `undefined` keeps it as source. */
+export type DiagramImage = (diagram: Diagram) => string | undefined;
+
+function diagramBlock(diagram: Diagram, image: string | undefined): string {
+  if (image) return `**Diagram:** ${diagram.diagram_type}\n\n![${diagram.diagram_type} diagram](${image})`;
+  const fence = diagram.content.includes("```") ? "~~~~" : "```";
+  return `**Diagram:** ${diagram.diagram_type}\n\n${fence}${diagram.format}\n${diagram.content}\n${fence}`;
+}
+
+/** The document's title heading and sections, as an array of Markdown blocks (join with "\n\n").
+ * `imageFor`, when it returns a path for a diagram, links to it instead of embedding the source —
+ * this is the one place the site export differs from the single-document export. */
+export function documentBody(document: ProjectDocument, imageFor?: DiagramImage): string[] {
+  const parts: string[] = [`# ${document.name}`];
+  for (const section of document.sections) {
+    parts.push(`## ${section.title}`);
+    if (section.content.trim()) parts.push(section.content.trim());
+    for (const diagram of section.diagrams) parts.push(diagramBlock(diagram, imageFor?.(diagram)));
+  }
+  return parts;
+}
 
 /**
  * Markdown with YAML front matter (title, project, template, language, date), as
  * read by static site generators, DocFX / Microsoft Learn-style sites and wikis.
  */
 export function buildMarkdown(document: ProjectDocument, meta: ExportMeta): string {
-  const parts = [
-    `---\ntitle: ${yaml(document.name)}\nproject: ${yaml(meta.projectName)}\ntemplate: ${yaml(document.template)}\nlanguage: ${yaml(document.language)}\ndate: ${meta.date}\n---`,
-    `# ${document.name}`,
-  ];
-  for (const section of document.sections) {
-    parts.push(`## ${section.title}`);
-    if (section.content.trim()) parts.push(section.content.trim());
-    for (const diagram of section.diagrams) {
-      const fence = diagram.content.includes("```") ? "~~~~" : "```";
-      parts.push(`**Diagram:** ${diagram.diagram_type}\n\n${fence}${diagram.format}\n${diagram.content}\n${fence}`);
-    }
-  }
-  return parts.join("\n\n") + "\n";
+  return [frontMatter(document, meta), ...documentBody(document)].join("\n\n") + "\n";
 }
 
 function escapeHtml(text: string): string {

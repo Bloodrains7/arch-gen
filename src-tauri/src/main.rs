@@ -11,6 +11,7 @@ mod python_runtime;
 mod release;
 mod runtime;
 mod renderer;
+mod site;
 mod visio;
 use tauri::Manager;
 
@@ -60,6 +61,7 @@ fn main() {
             git::git_push_project,
             release::list_release_templates,
             release::save_release_template,
+            site::export_site,
             legacy::import_legacy_project,
             runtime::open_edit_session,
             runtime::apply_project_edit,
