@@ -262,6 +262,16 @@ fn extension(format: &str) -> &'static str {
     }
 }
 
+/// `CON.md`, `nul.txt`, `COM1.puml`: on Windows these open a device, not a file,
+/// whatever the extension. Generated names never are one (see `slug`).
+fn windows_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or_default().trim_end().to_ascii_lowercase();
+    matches!(stem.as_str(), "con" | "prn" | "aux" | "nul")
+        || (stem.len() == 4
+            && (stem.starts_with("com") || stem.starts_with("lpt"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+}
+
 /// Manifests come from cloned repositories: a name is one ordinary path component.
 pub(crate) fn safe_name(name: &str) -> Result<&str, String> {
     let unsafe_name = name.is_empty()
@@ -270,6 +280,8 @@ pub(crate) fn safe_name(name: &str) -> Result<&str, String> {
         || name.len() > 200
         || name.starts_with(' ')
         || name.ends_with([' ', '.'])
+        // Only refused where it is a device: elsewhere such a hand-written file still opens.
+        || (cfg!(windows) && windows_device_name(name))
         || name
             .chars()
             .any(|c| c.is_control() || r#"/\:*?"<>|"#.contains(c));
@@ -956,6 +968,21 @@ mod tests {
         project.documents[0].sections[0].id = "doc".into();
         assert!(save(&dir.0, &project, None).is_err());
         assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn windows_device_names_are_recognized_with_any_extension() {
+        for name in ["con", "CON.md", "nul.txt", "Aux.puml", "com1.md", "LPT9", "prn .md"] {
+            assert!(windows_device_name(name), "{name}");
+        }
+        for name in ["console.md", "com10.md", "com0.md", "icon.md", "null.md", "lpt.md", "con-section.md"] {
+            assert!(!windows_device_name(name), "{name}");
+        }
+        // Every generated name stays clear of them.
+        for title in ["CON", "nul", "COM1", "lpt9"] {
+            assert!(!windows_device_name(&format!("{}.md", slug(title, "section"))), "{title}");
+        }
+        assert_eq!(safe_name("CON.md").is_err(), cfg!(windows));
     }
 
     #[test]
