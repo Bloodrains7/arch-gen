@@ -166,6 +166,35 @@ class ProviderTests(unittest.TestCase):
             finally:
                 sys.modules.pop("agent", None)
 
+    def test_c4_diagram_types_reach_their_stdlib_example(self):
+        # The UI sends diagram_type "c4_context"/"c4_container" (Canvas.svelte maps
+        # the sidebar's "c4-context"/"c4-container" chips by replacing the dash).
+        # DiagramGenerator.forward must look these keys up in PLANTUML_EXAMPLES and
+        # actually pass that example through as syntax_example, not silently fall
+        # back to the generic "class" example.
+        self.dspy.Signature = type("Signature", (), {})
+        self.dspy.Module = type("Module", (), {})
+        self.dspy.InputField = self.dspy.OutputField = MagicMock()
+        self.dspy.ChainOfThought = MagicMock()
+        self.dspy.Predict = MagicMock(
+            side_effect=lambda signature: (lambda **kw: SimpleNamespace(plantuml_code=kw["syntax_example"]))
+        )
+        self.dspy.configure = MagicMock()
+        graph = SimpleNamespace(StateGraph=MagicMock(), END="end")
+        with patch.dict(sys.modules, {"langgraph": SimpleNamespace(graph=graph), "langgraph.graph": graph}):
+            sys.modules.pop("agent", None)
+            try:
+                agent = importlib.import_module("agent")
+                for diagram_type in ("c4_context", "c4_container"):
+                    example = agent.PLANTUML_EXAMPLES[diagram_type]
+                    self.assertIn("!include <C4/C4_", example)
+                    result = agent.diagram_gen.forward(
+                        system_description="A system", diagram_type=diagram_type, output_format="plantuml",
+                    )
+                    self.assertEqual(result, example)
+            finally:
+                sys.modules.pop("agent", None)
+
 
 if __name__ == "__main__":
     unittest.main()

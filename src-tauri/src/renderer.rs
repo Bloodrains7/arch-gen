@@ -16,6 +16,22 @@ const MAX_SOURCE: usize = 256 * 1024;
 const MAX_SVG: usize = 4 * 1024 * 1024;
 static RENDERS: Semaphore = Semaphore::const_new(2);
 
+// The only preprocessor lines this renderer accepts: PlantUML's own C4 stdlib,
+// bundled inside plantuml.jar and reachable without any file or network access.
+// Canonical (mixed-case) form, since PlantUML resolves stdlib names case-insensitively
+// and this is what we emit to the renderer regardless of how the caller cased it —
+// no user-controlled casing ever reaches the output, so case cannot be used to sneak
+// a different string past the whitelist.
+const C4_INCLUDES: [&str; 7] = [
+    "!include <C4/C4>",
+    "!include <C4/C4_Context>",
+    "!include <C4/C4_Container>",
+    "!include <C4/C4_Component>",
+    "!include <C4/C4_Dynamic>",
+    "!include <C4/C4_Deployment>",
+    "!include <C4/C4_Sequence>",
+];
+
 fn validate(source: &str) -> Result<String, String> {
     if source.len() > MAX_SOURCE {
         return Err("Diagram exceeds the 256 KiB render limit.".into());
@@ -26,17 +42,30 @@ fn validate(source: &str) -> Result<String, String> {
     {
         return Err("Local rendering requires one @startuml / @enduml diagram.".into());
     }
+    let mut body = Vec::with_capacity(lines.len().saturating_sub(2));
     for line in &lines[1..lines.len() - 1] {
-        let lower = line.trim().to_lowercase();
-        // Deliberately restricted first renderer: no preprocessing, includes,
-        // alternative layouts, multiple diagrams or filename directives.
+        let trimmed = line.trim();
+        let lower = trimmed.to_lowercase();
+        // Deliberately restricted renderer: no preprocessing, includes,
+        // alternative layouts, multiple diagrams or filename directives —
+        // except the exact C4 stdlib includes above (whitelist, not a prefix
+        // match, so `!include <C4/../../etc/passwd>` or `!includeurl ...`
+        // still fall through to the rejection below).
         if lower.starts_with('!') || lower.starts_with('@') {
-            return Err("Local rendering does not support preprocessor/include directives or multiple diagrams yet.".into());
+            match C4_INCLUDES.iter().find(|allowed| allowed.to_lowercase() == lower) {
+                Some(canonical) => body.push((*canonical).to_string()),
+                None => return Err(format!(
+                    "Local rendering does not support preprocessor/include directives or multiple diagrams, except these C4 stdlib includes: {}.",
+                    C4_INCLUDES.join(", ")
+                )),
+            }
+        } else {
+            body.push((*line).to_string());
         }
     }
     Ok(format!(
         "@startuml\n!pragma layout smetana\n{}\n@enduml\n",
-        lines[1..lines.len() - 1].join("\n")
+        body.join("\n")
     ))
 }
 
@@ -198,6 +227,61 @@ mod tests {
             .unwrap()
             .contains("!pragma layout smetana"));
     }
+    #[test]
+    fn c4_stdlib_includes_are_whitelisted_exactly() {
+        for include in C4_INCLUDES {
+            // Accepted verbatim, with surrounding whitespace, and in any case —
+            // PlantUML itself resolves stdlib names case-insensitively, and we
+            // always emit the canonical spelling regardless of the input's case.
+            for variant in [
+                include.to_string(),
+                format!("  {include}  "),
+                include.to_uppercase(),
+                include.to_lowercase(),
+            ] {
+                let source = format!("@startuml\n{variant}\nPerson(a, \"A\", \"desc\")\n@enduml");
+                let rendered =
+                    validate(&source).unwrap_or_else(|e| panic!("{variant:?} rejected: {e}"));
+                assert!(
+                    rendered.contains(include),
+                    "{variant:?} -> {rendered} missing canonical {include:?}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn only_the_c4_stdlib_includes_are_allowed() {
+        for source in [
+            "@startuml\n!include <C4/C4_Context>.puml\n@enduml",
+            "@startuml\n!include <C4/../../etc/passwd>\n@enduml",
+            "@startuml\n!include <C4/C4_Context>\n!include <C4/../../etc/passwd>\n@enduml",
+            "@startuml\n!includeurl https://example.com/C4_Context.puml\n@enduml",
+            "@startuml\n!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml\n@enduml",
+            "@startuml\n!include C4_Context.puml\n@enduml",
+            "@startuml\n!include ../secret.puml\n@enduml",
+            "@startuml\n!import <C4/C4_Context>\n@enduml",
+            "@startuml\n!define FOO bar\n@enduml",
+            "@startuml\n!pragma layout dot\n@enduml",
+            "@startuml\n!theme amiga\n@enduml",
+            "@startuml\n!include <awslib/AWSCommon>\n@enduml",
+            // Valid include followed by a second diagram — still rejected as a whole.
+            "@startuml\n!include <C4/C4_Context>\n@enduml\n@startuml\n@enduml",
+        ] {
+            assert!(validate(source).is_err(), "{source}");
+        }
+    }
+    #[test]
+    fn generated_input_wraps_the_c4_include_between_pragma_and_body() {
+        let rendered =
+            validate("@startuml\n!include <C4/C4_Context>\nPerson(a, \"A\", \"desc\")\n@enduml")
+                .unwrap();
+        assert!(rendered.starts_with("@startuml\n"));
+        assert!(rendered.trim_end().ends_with("@enduml"));
+        let pragma_at = rendered.find("!pragma layout smetana").unwrap();
+        let include_at = rendered.find("!include <C4/C4_Context>").unwrap();
+        let body_at = rendered.find("Person(a").unwrap();
+        assert!(pragma_at < include_at && include_at < body_at);
+    }
     #[tokio::test]
     async fn output_is_bounded() {
         assert!(limited(&b"12345"[..], 4).await.is_err());
@@ -210,6 +294,8 @@ mod tests {
         for source in [
             "@startuml\nA -> B: Offline\n@enduml",
             "@startuml\nclass Customer\nclass Order\nCustomer --> Order\n@enduml",
+            "@startuml\n!include <C4/C4_Context>\nPerson(user, \"User\", \"A user\")\nSystem(sys, \"My System\", \"Does something\")\nSystem_Ext(ext, \"External\", \"A dependency\")\nRel(user, sys, \"Uses\")\nRel(sys, ext, \"Calls\")\nSHOW_LEGEND()\n@enduml",
+            "@startuml\n!include <C4/C4_Container>\nPerson(user, \"User\", \"A user\")\nSystem_Boundary(c1, \"My System\") {\n  Container(web, \"Web App\", \"Svelte\", \"UI\")\n  Container(api, \"API\", \"Rust\", \"Logic\")\n}\nSystem_Ext(ext, \"External\", \"A dependency\")\nRel(user, web, \"Uses\", \"HTTPS\")\nRel(web, api, \"Calls\", \"IPC\")\nRel(api, ext, \"Calls\", \"HTTPS\")\nLAYOUT_WITH_LEGEND()\n@enduml",
         ] {
             let svg = render_at(&root, source).await.unwrap();
             assert!(svg.contains("<svg"));
