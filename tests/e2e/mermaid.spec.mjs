@@ -44,6 +44,9 @@ test("Mermaid renders automatically offline, sanitized, with readable labels and
   expect(svg).toContain("YesBranch");
   // Never a live DOM element, no active/external content, nothing left to run or fetch.
   expect(svg).not.toMatch(/<script|foreignobject|<a[\s>]|javascript:|<image[\s>]|<use[\s>]/i);
+  // Edges keep their arrowheads: same-document url(#marker) references survive the sanitizer.
+  expect(svg).toMatch(/<marker[\s>]/);
+  expect(svg).toMatch(/marker-end="url\(#[^)]+\)"/);
   expect(remote).toEqual([]);
   expect(await page.evaluate(() => window.calls.some((c) => c.command === "render_local_diagram"))).toBe(false);
 });
@@ -89,4 +92,27 @@ test("editing Mermaid content re-renders it, and a stale render never overwrites
   const svg = decodeSvg(await preview.getAttribute("src"));
   expect(svg).toContain("FreshNew");
   expect(svg).not.toContain("StaleOld");
+});
+
+test("directives and style statements that could fetch are refused, never rendered, and nothing leaves the machine", async ({ page }) => {
+  const remote = [];
+  page.on("request", (r) => { if (r.url().startsWith("http") && !r.url().startsWith("http://127.0.0.1")) remote.push(r.url()); });
+  const body = "flowchart LR\n  A[Client] --> B[Server]";
+  const sources = [
+    `%%{init: {"themeCSS": "@import url(https://example.invalid/import); .label { background: url(https://example.invalid/css) }"}}%%\n${body}`,
+    `---\nconfig:\n  themeCSS: ".node rect { fill: url(https://example.invalid/frontmatter) }"\n---\n${body}`,
+    `%%{init: {"flowchart": {"curve": "basis"}, "sequence": {"actorFontFamily": "x; } * { background: url(https://example.invalid/font) }"}}}%%\n${body}`,
+    `${body}\n  style A fill:url(https://example.invalid/style),background:url(https://example.invalid/bg)`,
+    `${body}\n  classDef c fill:u\\rl(https://example.invalid/escape)\n  class A c`,
+  ];
+  for (const source of sources) {
+    await openMermaidFixture(page, source);
+    await expect(page.locator(".puml-error[role=alert]")).toContainText(/not supported|plain values/, { timeout: 10000 });
+    await expect(page.getByRole("img", { name: "Mermaid Diagram" })).toHaveCount(0);
+  }
+  // Plain styling still renders.
+  await openMermaidFixture(page, `${body}\n  style A fill:#f9f,stroke:#333,stroke-width:2px`);
+  await expect(page.getByRole("img", { name: "Mermaid Diagram" })).toBeVisible({ timeout: 10000 });
+  await page.waitForTimeout(500);
+  expect(remote).toEqual([]);
 });

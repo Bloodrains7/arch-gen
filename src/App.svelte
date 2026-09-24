@@ -18,6 +18,7 @@
   import { buildSite, renderDiagrams } from "./lib/site-export";
   import type { DiagramRenderer } from "./lib/site-export";
   import { sanitizeSvg } from "./lib/local-svg";
+  import { renderMermaidSvg } from "./lib/mermaid";
   import { EditSession, jobCompatible } from "./lib/runtime";
   import type { GenerationJob, GenerationRequest } from "./lib/runtime";
   import { fetchAiStatus } from "./lib/ai";
@@ -391,13 +392,14 @@
   const today = () => new Date().toLocaleDateString("sv-SE");
 
   // Exports the project as it is now, unsaved edits included (dirty says so in the status
-  // line). PlantUML renders locally through the same private renderer Toolbar's HTML export
-  // uses; this is the one place another local renderer (Mermaid) gets plugged in later —
-  // everything else stays as fenced source in the page, exactly like the single-document export.
+  // line). Diagrams render locally as in the HTML export: PlantUML through the private
+  // renderer, Mermaid in the page; anything else stays as fenced source in the page.
   const renderSiteDiagram: DiagramRenderer = async (diagram: Diagram) => {
-    if (diagram.format !== "plantuml") return null;
-    try { return sanitizeSvg(await invoke<string>("render_local_diagram", { content: diagram.content })); }
-    catch { return null; }
+    try {
+      if (diagram.format === "plantuml") return sanitizeSvg(await invoke<string>("render_local_diagram", { content: diagram.content }));
+      if (diagram.format === "mermaid") return sanitizeSvg(await renderMermaidSvg(diagram.content));
+    } catch { /* Kept as fenced source; the status line counts it. */ }
+    return null;
   };
 
   async function exportSite() {

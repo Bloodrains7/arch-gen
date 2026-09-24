@@ -60,7 +60,7 @@ pub fn valid_sections(sections: &[DocSectionRequest]) -> Result<(), String> {
     Ok(())
 }
 
-const C4_RULE: &str = "For a C4 diagram use the PlantUML standard library include \"!include <C4/C4_Context>\" (or C4_Container, C4_Component, C4_Dynamic, C4_Deployment) and never a URL or file include.";
+const C4_RULE: &str = "For a C4 diagram use the PlantUML standard library include \"!include <C4/C4_Context>\" (or C4_Container, C4_Component, C4_Dynamic, C4_Deployment) and never a URL or file include. A \"mermaid\" diagram uses no %%{init}%% directive, no front-matter config and no url() in styles (the local preview refuses them).";
 
 pub fn documentation_system_prompt(language: &str) -> String {
     format!(

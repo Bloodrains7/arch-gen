@@ -26,22 +26,27 @@ async function openTwoDocumentFixture(page) {
   await page.getByRole("button", { name: "Open project", exact: true }).click();
 }
 
-test("Export site renders PlantUML locally, keeps Mermaid as source and reports the result", async ({ page }) => {
+test("Export site renders PlantUML and Mermaid locally as SVG files and reports the result", async ({ page }) => {
   await openTwoDocumentFixture(page);
   await page.getByRole("button", { name: "Export site…", exact: true }).click();
   await expect(page.locator(".project-status").first()).toContainText("Exported 2 documents to fixture-project");
-  await expect(page.locator(".project-status").first()).toContainText("1 diagram as SVG");
-  await expect(page.locator(".project-status").first()).toContainText("1 diagram as source");
+  await expect(page.locator(".project-status").first()).toContainText("2 diagrams as SVG");
+  await expect(page.locator(".project-status").first()).toContainText("0 diagrams as source");
   await expect(page.locator(".project-status").first()).not.toContainText("unsaved edits");
 
   const call = await page.evaluate(() => window.calls.find(c => c.command === "export_site"));
   expect(call.args.path).toBe("fixture-project");
   const files = Object.fromEntries(call.args.files.map(f => [f.path, f.content]));
   expect(Object.keys(files).sort()).toEqual([
-    "billing.md", "images/billing/context-1.svg", "index.md", "mkdocs.yml", "ops.md", "toc.yml",
+    "billing.md", "images/billing/context-1.svg", "images/billing/context-2.svg", "index.md", "mkdocs.yml", "ops.md", "toc.yml",
   ]);
   expect(files["billing.md"]).toContain("![sequence diagram](images/billing/context-1.svg)");
-  expect(files["billing.md"]).toContain("```mermaid\ngraph TD\nA-->B\n```");
+  expect(files["billing.md"]).toContain("![flow diagram](images/billing/context-2.svg)");
+  expect(files["billing.md"]).not.toContain("```mermaid");
+  // Mermaid rendered in the page, sanitized the same way, with its arrowhead markers kept.
+  expect(files["images/billing/context-2.svg"]).toMatch(/^<svg[\s>]/);
+  expect(files["images/billing/context-2.svg"]).toMatch(/marker-end="url\(#/);
+  expect(files["images/billing/context-2.svg"]).not.toMatch(/<script|foreignObject|<image|<style|example\.invalid/i);
   expect(files["ops.md"]).not.toContain("images/");
   expect(files["index.md"]).toContain("[Billing](billing.md)");
   expect(files["index.md"]).toContain("[Ops](ops.md)");
@@ -70,9 +75,9 @@ test("a local PlantUML render failure falls back to fenced source instead of fai
   await openTwoDocumentFixture(page);
   await page.evaluate(() => { window.renderFailure = true; });
   await page.getByRole("button", { name: "Export site…", exact: true }).click();
-  await expect(page.locator(".project-status").first()).toContainText("2 diagrams as source");
+  await expect(page.locator(".project-status").first()).toContainText("1 diagram as SVG, 1 diagram as source");
   const call = await page.evaluate(() => window.calls.find(c => c.command === "export_site"));
-  expect(call.args.files.some(f => f.path.startsWith("images/"))).toBe(false);
+  expect(call.args.files.filter(f => f.path.startsWith("images/")).map(f => f.path)).toEqual(["images/billing/context-2.svg"]);
   const billing = call.args.files.find(f => f.path === "billing.md").content;
   expect(billing).toContain("```plantuml\n@startuml\nA -> B\n@enduml\n```");
 });

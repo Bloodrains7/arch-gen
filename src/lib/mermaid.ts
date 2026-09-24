@@ -27,6 +27,30 @@ export function mermaidErrorMessage(err: unknown): string {
   return short ? `Invalid Mermaid diagram: ${short}` : "Invalid Mermaid diagram.";
 }
 
+// Mermaid mounts its SVG, <style> block and inline styles in the live page while it
+// measures text, so any CSS that reaches it can fetch (url(), @import, image-set()) —
+// and the source comes from project files, possibly a cloned repository. Directives and
+// front-matter config can set themeCSS, fonts or per-diagram CSS values at any depth, so
+// they are refused outright; style statements may only use plain values (names, #hex,
+// numbers, rgb()/hsl()), never url(), escapes or at-rules. Returns why, or null.
+const STYLE_STATEMENT = /^\s*(?:style|classDef|linkStyle|cssClass)\b(.*)$/i;
+const STYLE_CALL = /^\s*(?:Update\w*Style|UpdateLayoutConfig)\s*\((.*)\)\s*$/i;
+export function mermaidSourceProblem(source: string): string | null {
+  const text = source.replace(/\r\n?/g, "\n");
+  if (text.includes("%%{")) return "Mermaid init directives (%%{…}%%) are not supported in the local preview: they can load remote resources. Remove the directive.";
+  const front = /^\s*---\n([\s\S]*?)\n---/.exec(text);
+  if (front && /^\s*config\s*:/m.test(front[1])) return "Mermaid front-matter config is not supported in the local preview: it can load remote resources. Keep only title: in the front matter.";
+  for (const line of text.split("\n")) {
+    const values = (STYLE_STATEMENT.exec(line) ?? STYLE_CALL.exec(line))?.[1];
+    // Any "(" left after the colour functions could open url(), image-set() and the like;
+    // a backslash could spell one with a CSS escape; "@" starts an at-rule.
+    if (values !== undefined && /[\\@(]/.test(values.replace(/\b(?:rgba?|hsla?)\(/gi, ""))) {
+      return `Mermaid style statements may only use plain values (names, #hex, numbers, rgb()/hsl()) in the local preview: ${line.trim().slice(0, 80)}`;
+    }
+  }
+  return null;
+}
+
 const MERMAID_CONFIG: MermaidConfig = {
   startOnLoad: false,
   // Mermaid's own sanitizing pass (drops script/click bindings); local-svg.ts strips
@@ -41,6 +65,9 @@ const MERMAID_CONFIG: MermaidConfig = {
   // is what actually decides whether a diagram is rendered at all, so keep this above
   // that check's threshold rather than let Mermaid silently swap in a placeholder text.
   maxTextSize: MAX_MERMAID_SOURCE_BYTES,
+  // Defence in depth behind mermaidSourceProblem(): directives may never change these.
+  secure: ["secure", "securityLevel", "startOnLoad", "maxTextSize", "suppressErrorRendering", "maxEdges",
+    "themeCSS", "themeVariables", "fontFamily", "altFontFamily", "htmlLabels"],
 };
 
 type MermaidModule = typeof import("mermaid");
@@ -131,6 +158,8 @@ export function renderMermaidSvg(source: string): Promise<string> {
   if (byteLength(source) > MAX_MERMAID_SOURCE_BYTES) {
     return Promise.reject(new Error(`Diagram exceeds the ${MAX_MERMAID_SOURCE_BYTES / 1024} KiB render limit.`));
   }
+  const problem = mermaidSourceProblem(source);
+  if (problem) return Promise.reject(new Error(problem));
   const result = queue.then(() => renderOnce(source), () => renderOnce(source));
   queue = result.then(() => undefined, () => undefined);
   return result;

@@ -46,9 +46,10 @@ diakritiky, najviac 60 znakov; prázdny názov padne na `document.md`).
 Samostatná HTML stránka pre tlač do PDF alebo otvorenie vo Worde. PlantUML diagramy
 sa vyrenderujú lokálnym rendererom (`render_local_diagram`, žiadny upload), výsledné
 SVG sa sanitizuje (`src/lib/local-svg.ts`) a vloží ako `data:image/svg+xml` obrázok.
-Diagramy, ktoré sa lokálne vyrenderovať nedajú (typicky Mermaid — lokálny renderer
-zatiaľ nie je zapojený), zostávajú v stránke ako zdrojový kód; stavový riadok povie,
-koľko ich bolo.
+Mermaid diagramy sa vykreslia lokálne v aplikácii (`src/lib/mermaid.ts`,
+[DIAGRAMY.md](DIAGRAMY.md)) a vložia rovnako. Diagramy, ktoré sa lokálne vyrenderovať
+nedajú (chyba syntaxe, odmietnutá direktíva, chýbajúci renderer), zostávajú v stránke ako
+zdrojový kód; stavový riadok povie, koľko ich bolo.
 
 ## Export site… — celý projekt ako web dokumentácie
 
@@ -70,11 +71,11 @@ web-dokumentacia/
 - **Exportuje sa aktuálny stav v pamäti**, vrátane neuloženého rozpracovania — stavový
   riadok to povie (`unsaved edits included`), ak sa nezhoduje s naposledy uloženou verziou.
 - **Diagramy:** PlantUML sa renderuje rovnakým súkromným lokálnym rendererom ako
-  HTML export a zapíše sa ako samostatný `.svg` súbor
+  HTML export, Mermaid lokálne v aplikácii, a každý sa zapíše ako samostatný `.svg` súbor
   (`images/<slug dokumentu>/<slug sekcie>-<poradie>.svg`), na ktorý stránka dokumentu
   odkazuje relatívnym odkazom `![typ diagram](images/...)`. Diagram, ktorý sa lokálne
-  vyrenderovať nedá (chyba renderera, alebo iný formát ako PlantUML — napr. Mermaid,
-  kým preň nie je zapojený lokálny renderer), zostane vo fenced bloku ```` ```mermaid ````
+  vyrenderovať nedá (chyba renderera alebo syntaxe, odmietnutá Mermaid direktíva),
+  zostane vo fenced bloku (napr. ```` ```mermaid ````)
   — presne to na GitHube, Azure DevOps wiki aj v MkDocs Material vykreslí natívne bez
   akéhokoľvek servera. Stavový riadok po exporte ukáže, koľko diagramov skončilo ako
   SVG a koľko ako zdroj.

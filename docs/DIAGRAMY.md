@@ -43,9 +43,18 @@ webview a nič nesťahuje (žiadne fonty, žiadne ikonové balíčky, žiadna si
   `mermaid.ts` pred vrátením SVG sám prepočíta štýl každého elementu
   (`getComputedStyle` v skrytom, dočasnom DOM uzle) a zapíše ho ako obyčajné SVG atribúty
   (`fill`, `stroke`, `font-family`, …). Vďaka tomu diagram po sanitizácii zostáva čitateľný
-  — text aj tvary majú farbu — hoci jemnosti ako šípky na hranách (`marker-end="url(#…)"`)
-  alebo tieň (`filter="url(#…)"`) sanitizácia odstráni spolu s každým ostatným `url(...)`
-  odkazom (rovnaké pravidlo ako pri PlantUML).
+  — text aj tvary majú farbu. Odkazy `url(#id)` do toho istého SVG (šípky na hranách cez
+  `marker-end`, gradienty, tieň) sanitizácia ponechá, lebo nič nesťahujú; každé iné
+  `url(...)` (aj zapísané CSS escape sekvenciou) odstráni — pri PlantUML rovnako.
+- **Zdroj, ktorý by mohol niečo stiahnuť, sa nevykreslí**: Mermaid počas vykresľovania
+  vkladá SVG so `<style>` blokom do živej stránky, a CSS v ňom môže siahnuť na sieť
+  (`url()`, `@import`, `image-set()`). Zdroj diagramu pochádza zo súborov projektu, teda aj
+  z cudzieho repozitára. Preto náhľad odmietne s jasnou správou: init direktívy
+  `%%{…}%%`, `config:` v úvodnej hlavičke (`title:` je v poriadku) a príkazy `style`,
+  `classDef`, `linkStyle` a C4 `Update…Style` s čímkoľvek iným než obyčajnými hodnotami
+  (názvy, `#hex`, čísla, `rgb()`/`hsl()`): žiadne `url(`, `\` ani `@`. Mermaid navyše
+  dostane `secure` kľúče, takže direktívy nemôžu meniť `themeCSS`, `themeVariables` ani
+  písma. AI prompty takéto konštrukcie nepoužívajú.
 - **Vykresľuje sa sériovo**: Mermaid nie je znovu-vstupný (viacero súbežných vykreslení by
   si mohlo prekážať), preto `mermaid.ts` udržiava frontu a spracúva vykreslenia jedno po
   druhom, s unikátnym id pre každé. Dočasný DOM uzol, ktorý si Mermaid necháva počas
@@ -80,5 +89,7 @@ takto zostalo ako zdroj ("N diagram(s) included as source (not renderable locall
   alebo AI rework konkrétneho diagramu).
 - Mermaid v lokálnom renderer pre Visio/EA export (tie zostávajú neimplementované
   placeholdery, pozri `docs/ZLEPSENIA.md`).
-- Plná vizuálna vernosť Mermaid predlohy (farebné témy, šípky, tieň) — sanitizácia ich
-  časť odstraňuje zámerne; text a tvary zostávajú čitateľné.
+- Plná vizuálna vernosť Mermaid predlohy (farebné témy, vlastné CSS) — sanitizácia ju
+  zámerne obmedzuje na farby, čiary, písmo a lokálne odkazy (šípky); text a tvary
+  zostávajú čitateľné.
+- Mermaid témy a direktívy (`%%{init: …}%%`) — lokálny náhľad ich odmieta, pozri vyššie.

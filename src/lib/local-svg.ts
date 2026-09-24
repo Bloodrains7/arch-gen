@@ -13,7 +13,10 @@ export function sanitizeSvg(source: string): string {
   if (document.querySelector("parsererror") || document.documentElement.localName !== "svg") throw new Error("Invalid SVG from local renderer.");
   for (const element of document.querySelectorAll("*")) {
     for (const attr of [...element.attributes]) {
-      if (/url\s*\(/i.test(attr.value)) element.removeAttributeNode(attr);
+      // url(#id) points inside this same SVG (arrowhead markers, gradients) and fetches
+      // nothing; any other url() goes, including one spelled with CSS escapes.
+      const external = attr.value.replace(/url\(\s*(["']?)#[\w.:-]+\1\s*\)/gi, "");
+      if (/url\s*\(|\\/i.test(external)) element.removeAttributeNode(attr);
     }
   }
   return new XMLSerializer().serializeToString(document.documentElement);

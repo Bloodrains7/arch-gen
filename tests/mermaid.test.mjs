@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MAX_MERMAID_SOURCE_BYTES, mermaidErrorMessage, renderMermaidSvg } from "../src/lib/mermaid.ts";
+import { MAX_MERMAID_SOURCE_BYTES, mermaidErrorMessage, mermaidSourceProblem, renderMermaidSvg } from "../src/lib/mermaid.ts";
 
 // Pure logic only: actually rendering needs a browser DOM (mermaid.render() and our
 // own computed-style inlining both touch `document`), so that path is covered by the
@@ -43,4 +43,28 @@ test("mermaidErrorMessage handles a non-Error rejection and an empty message", (
   assert.equal(mermaidErrorMessage("boom"), "Invalid Mermaid diagram: boom");
   assert.equal(mermaidErrorMessage(new Error("")), "Invalid Mermaid diagram.");
   assert.equal(mermaidErrorMessage(new Error("   \n  \n")), "Invalid Mermaid diagram.");
+});
+
+test("sources that could make Mermaid load something are refused before rendering, plain styling is not", async () => {
+  const body = "flowchart LR\n  A[Client] --> B[Server]";
+  for (const risky of [
+    `%%{init: {"theme": "dark"}}%%\n${body}`,
+    `---\ntitle: T\nconfig:\n  themeCSS: ".x{}"\n---\n${body}`,
+    `${body}\n  style A fill:url(https://example.invalid/a)`,
+    `${body}\n  classDef c fill:u\\rl(https://example.invalid/b)`,
+    `${body}\n  linkStyle 0 stroke:rgb(url(https://example.invalid/c))`,
+    `${body}\n  style A background:image-set("https:example.invalid" 1x)`,
+    `${body}\n  classDef c @import`,
+    "C4Context\n  Person(a, \"A\")\n  UpdateElementStyle(a, $bgColor=\"url(https://example.invalid/d)\")",
+  ]) {
+    assert.ok(mermaidSourceProblem(risky), risky);
+    await assert.rejects(renderMermaidSvg(risky), /not supported|plain values/);
+  }
+  for (const plain of [
+    body,
+    `---\ntitle: Checkout\n---\n${body}`,
+    `${body}\n  style A fill:#f9f,stroke:rgb(51, 51, 51),stroke-width:4px\n  classDef curly fill:hsl(210 50% 50%),color:#fff\n  linkStyle default stroke:rgba(0,0,0,0.5)`,
+    "C4Context\n  Person(a, \"A\")\n  UpdateElementStyle(a, $bgColor=\"grey\", $borderColor=\"rgb(1,2,3)\")",
+    "flowchart LR\n  A[\"Label with url(x) and C:\\\\path is just text\"] --> B",
+  ]) assert.equal(mermaidSourceProblem(plain), null, plain);
 });
