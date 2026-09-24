@@ -12,6 +12,9 @@ moj-projekt/
       1-introduction-and-goals.md       "# Nadpis" + Markdown obsah sekcie
       5-building-block-view.md
       5-building-block-view.class.puml  zdroj diagramu (PlantUML → .puml, Mermaid → .mmd)
+  templates/
+    release-notes/
+      zakaznicke-poznamky.md            vlastná šablóna release notes (voliteľné)
 ```
 
 ## Pravidlá
@@ -43,12 +46,22 @@ moj-projekt/
 - Manifesty z cudzieho repozitára sú nedôveryhodný vstup: názvy súborov musia byť
   jedna bežná zložka cesty (žiadne `..`, `/`, `\`, `:`), celkový obsah najviac 32 MiB.
 
+- **`templates/release-notes/*.md`** sú šablóny release notes zdieľané cez Git
+  ([GIT-A-RELEASE-NOTES.md](GIT-A-RELEASE-NOTES.md)). Nie sú v manifeste: uloženie projektu
+  ich neprepíše, nezmaže a nezapočíta do odtlačku obsahu.
+- Guidance v sekciách zo šablón je HTML komentár `<!-- … -->`: v editore viditeľný, v náhľade
+  a exportoch nie. Dá sa zmazať ako ktorýkoľvek text.
+
 ## História
 
 Git history v aplikácii číta `git log` pre priečinok projektu a obsah commitu cez
 `git cat-file`, bez checkoutu a bez zmeny repozitára. Restore vytvorí novú pracovnú
-revíziu; do Gitu sa dostane až tvojím uložením a commitom. ArchGen sám necommituje.
-Neuložené a necommitnuté uloženia v histórii nie sú.
+revíziu; do Gitu sa dostane až tvojím uložením a commitom. Neuložené a necommitnuté
+uloženia v histórii nie sú.
+
+ArchGen necommituje sám. **Commit…** v Git lište commitne na výslovný pokyn iba priečinok
+projektu a iba uložený obsah; **Push** pošle aktuálnu vetvu do jej upstreamu po potvrdení
+([GIT-A-RELEASE-NOTES.md](GIT-A-RELEASE-NOTES.md)).
 
 ## Staré `.archgen` súbory
 

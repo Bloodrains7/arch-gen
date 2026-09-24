@@ -277,7 +277,54 @@ export function installIpcMock(fixtures) {
         return { project, fingerprint: fingerprint(project) };
       }
       if (command === "import_legacy_project") return window.loadFixture;
-      if (command === "get_template") return ["Overview", "Data model"];
+      // Git (git.rs, release.rs). Argument names are checked like the ai_* commands:
+      // a misnamed IPC argument is exactly what a mocked UI test must not hide.
+      const git = window.gitFixture ?? {};
+      if (command === "git_list_refs") {
+        noUnknownArgs(args, ["path"]);
+        if (git.refsError) throw new Error(git.refsError);
+        return clone(git.refs ?? { root: "/repo", branch: "main", head: "c".repeat(40), refs: [
+          { name: "v1.1.0", kind: "tag", commit: "b".repeat(40), date: "2026-09-10T10:00:00+02:00" },
+          { name: "v1.0.0", kind: "tag", commit: "a".repeat(40), date: "2026-08-01T10:00:00+02:00" },
+          { name: "main", kind: "branch", commit: "c".repeat(40), date: "2026-09-20T10:00:00+02:00" },
+        ] });
+      }
+      if (command === "git_log_range") {
+        noUnknownArgs(args, ["path", "from", "to", "subpath", "includeMerges"]);
+        const commit = (n, subject, body = "") => ({ hash: String(n).repeat(40).slice(0, 40), shortHash: String(n).repeat(7), parents: 1, author: "Ján Novák", date: "2026-09-20T10:00:00+02:00", subject, body });
+        return clone(git.range ?? { root: "/repo", from: "b".repeat(40), to: "c".repeat(40), truncated: false, commits: [
+          commit(1, "feat(api): add refunds (#12)"), commit(2, "fix: rounding in totals"), commit(3, "chore: bump deps"),
+        ] });
+      }
+      if (command === "git_project_status") {
+        noUnknownArgs(args, ["path", "projectId"]);
+        if (git.statusError) throw new Error(git.statusError);
+        const committed = window.gitCommitted;
+        return clone(git.status ?? { root: "/repo", branch: "main", head: "c".repeat(40), upstream: "origin/main", ahead: committed ? 1 : 0, behind: 0, truncated: false,
+          changes: committed ? [] : [{ path: "archgen.json", status: "untracked" }, { path: "documents/untitled/document.json", status: "untracked" }] });
+      }
+      if (command === "git_commit_project") {
+        noUnknownArgs(args, ["path", "projectId", "expectedFingerprint", "message"]);
+        const stored = localStorage.getItem("test-saved-project");
+        if (!stored || fingerprint(JSON.parse(stored)) !== args.expectedFingerprint) throw new Error("The project folder changed on disk since ArchGen last saved or opened it.");
+        window.gitCommitted = args.message;
+        return { commit: "d".repeat(40), summary: args.message.split("\n")[0], files: 2 };
+      }
+      if (command === "git_push_project") {
+        noUnknownArgs(args, ["path", "projectId"]);
+        window.gitPushed = true;
+        return "Pushed main to origin.";
+      }
+      if (command === "list_release_templates") {
+        noUnknownArgs(args, ["path", "projectId"]);
+        return clone(window.releaseTemplates ?? []);
+      }
+      if (command === "save_release_template") {
+        noUnknownArgs(args, ["path", "projectId", "name", "content", "overwrite"]);
+        const file = `${args.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
+        window.releaseTemplates = [...(window.releaseTemplates ?? []).filter(t => t.file !== file), { file, content: args.content, error: null }];
+        return file;
+      }
       throw new Error(`Unexpected IPC: ${command}`);
     },
   };

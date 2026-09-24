@@ -6,11 +6,14 @@
   import Modal from "./lib/components/Modal.svelte";
   import ChangePreview from "./lib/components/ChangePreview.svelte";
   import AiSettings from "./lib/components/AiSettings.svelte";
+  import GitStatusBar from "./lib/components/GitStatusBar.svelte";
+  import ReleaseNotesDialog from "./lib/components/ReleaseNotesDialog.svelte";
   import { onMount, tick } from "svelte";
   import { invoke, isTauri } from "@tauri-apps/api/core";
   import { open, confirm } from "@tauri-apps/plugin-dialog";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { createProject, createDocument, updateDocument, captureTarget, applyGeneratedSections, parseProject, emptyHistory, recordChange, moveHistory, restoreSnapshot, sectionSource } from "./lib/project";
+  import { createProject, createDocument, updateDocument, normalizeSections, parseProject, emptyHistory, recordChange, moveHistory, restoreSnapshot, sectionSource } from "./lib/project";
+  import { applyTemplateStructure, findTemplate, isBlankSection } from "./lib/templates";
   import type { Project, ProjectDocument, Section } from "./lib/project";
   import { EditSession, jobCompatible } from "./lib/runtime";
   import type { GenerationJob, GenerationRequest } from "./lib/runtime";
@@ -64,6 +67,7 @@
   let aiStatus = $state<AiStatus | null>(null);
   let aiStatusError = $state("");
   let aiSettingsOpen = $state(false);
+  let releaseNotesOpen = $state(false);
   // The element to return focus to once the dialog's `{#if}` block has actually
   // left the DOM — captured at open time, since by then it is always the "AI
   // settings" button that has focus (settings-dialog-and-e2e-quality#11).
@@ -173,8 +177,26 @@
     undoHistory = { ...undoHistory, group: undefined };
   }
 
-  function setTemplate(tmpl: string) {
-    commitProject(updateDocument(project, activeTabId, { template: tmpl }), "Change template");
+  // Applying a template never loses content: matching sections are kept, other
+  // sections with content move after the template's, and only blank ones go.
+  function applyTemplate(id: string) {
+    const template = findTemplate(id);
+    if (!template) return;
+    const sections = applyTemplateStructure(activeTab.sections, template);
+    const kept = activeTab.sections.filter(s => sections.includes(s) && !isBlankSection(s)).length;
+    commitProject(updateDocument(project, activeTabId, { template: id, sections }), `Apply ${template.name} template`);
+    status = kept ? `Applied the ${template.name} structure; ${kept} existing section${kept === 1 ? " was" : "s were"} kept. Undo reverts it.` : `Applied the ${template.name} structure.`;
+  }
+
+  function createReleaseDocument(name: string, sections: Section[]) {
+    const created = { ...createDocument(name), template: "release-notes", language: activeTab.language, sections: normalizeSections(sections) };
+    commitProject({ ...project, revision: project.revision + 1, documents: [...tabs, created], activeDocumentId: created.id }, "Add release notes");
+    status = `Created document "${name}" from Git. Save the project to keep it.`;
+  }
+
+  function insertReleaseSections(sections: Section[]) {
+    commitProject(updateDocument(project, activeTabId, { sections: [...sections, ...activeTab.sections] }), "Insert release notes");
+    status = `Inserted release notes at the top of ${activeTab.name}. Save the project to keep them.`;
   }
 
   function setLanguage(lang: string) {
@@ -187,24 +209,6 @@
 
   function renameTab(id: string, name: string) {
     commitProject(updateDocument(project, id, { name }), "Rename document");
-  }
-
-  function beginUpdate(review = true) {
-    const target = captureTarget(project);
-    const startedSession = session;
-    let finished = false;
-    const finish = () => { finished = true; };
-    return Object.assign((sections: Section[]) => {
-      if (finished) return;
-      finish();
-      const result = startedSession === session ? applyGeneratedSections(project, target, sections) : null;
-      if (result && !review) {
-        commitProject(result, "Load template sections");
-        status = `Updated ${target.name}. Save the project to keep changes.`;
-      } else {
-        status = "The document changed while loading the template. Select the template again to apply it.";
-      }
-    }, { finish });
   }
 
   async function acceptResult(id: string) {
@@ -491,11 +495,8 @@
   <Sidebar
     selectedTemplate={activeTab.template}
     selectedLanguage={activeTab.language}
-    sections={activeTab.sections}
-    onTemplateChange={(tmpl: string) => setTemplate(tmpl)}
+    onApplyTemplate={applyTemplate}
     onLanguageChange={(l: string) => setLanguage(l)}
-    onSectionsChange={setSections}
-    {beginUpdate}
   />
   <div class="main">
     <div class="project-bar">
@@ -511,7 +512,10 @@
       <button disabled={fileBusy || !undoHistory.past.length} onclick={() => undoRedo("undo")} title={undoHistory.past.at(-1)?.label}>Undo</button>
       <button disabled={fileBusy || !undoHistory.future.length} onclick={() => undoRedo("redo")} title={undoHistory.future.at(-1)?.label}>Redo</button>
       <button disabled={fileBusy || !projectPath} onclick={() => loadHistory()}>Git history</button>
-      <span>Undo/Redo: current session · Git history: commits of the project folder</span>
+      <button disabled={fileBusy} onclick={() => releaseNotesOpen = true}>Release notes…</button>
+      <span class="spacer"></span>
+      <GitStatusBar {projectPath} projectId={project.id} projectName={project.name} fingerprint={savedFingerprint}
+        {dirty} busy={fileBusy || syncing > 0} onStatus={(message: string) => status = message} />
     </div>
     {#if status}<div class="project-status" role="status">{status}</div>{/if}
     <div class="pending-results">
@@ -560,10 +564,11 @@
       </div>
       <button class="tab-add" onclick={addTab} title="New document">+</button>
     </div>
-    <Toolbar selectedTemplate={activeTab.template} sections={activeTab.sections} />
+    <Toolbar document={activeTab} projectName={project.name} />
     {#key activeTab.id}
     <Canvas
       sections={activeTab.sections}
+      documentName={activeTab.name}
       {isGenerating}
       selectedLanguage={activeTab.language}
       {selection}
@@ -611,6 +616,12 @@
       void tick().then(() => aiSettingsOpener?.focus());
     }}
   />
+{/if}
+
+{#if releaseNotesOpen}
+  <ReleaseNotesDialog {projectPath} projectId={project.id} language={activeTab.language} documentName={activeTab.name}
+    onCreateDocument={createReleaseDocument} onInsertSections={insertReleaseSections}
+    onStatus={(message: string) => status = message} onClose={() => releaseNotesOpen = false} />
 {/if}
 
 {#if reviewing}
@@ -668,7 +679,8 @@
 <style>
   .runtime-error { position: fixed; top: 0; left: 0; right: 0; z-index: 10; padding: 16px; background: var(--bg-secondary); color: var(--text-primary); }
   .history-bar { display: flex; align-items: center; gap: 8px; padding: 8px 20px; background: var(--bg-secondary); }
-  .history-bar span { font-size: 12px; color: var(--text-muted); }
+  .history-bar { flex-wrap: wrap; }
+  .history-bar .spacer { flex: 1; }
   .history-bar button, .review-actions button, .revision-list button { padding: 7px 12px; color: var(--text-primary); background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; }
   .review-actions { display: flex; gap: 10px; position: sticky; bottom: -20px; padding: 16px 0; background: var(--bg-secondary); }
   .revision-list { display: flex; flex-wrap: wrap; gap: 8px; max-height: 180px; overflow-y: auto; }

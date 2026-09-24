@@ -8,6 +8,7 @@
 
   let {
     sections = [],
+    documentName = "Architecture Documentation",
     isGenerating,
     selectedLanguage = "en",
     selection = emptySelection(),
@@ -133,6 +134,31 @@
 
 ### Time-box: _ hours/days
 ### Output: [Document / PoC / ADR]`,
+    },
+    "adr": {
+      title: "ADR-NNNN: [short title of the decision]",
+      content: `**Status:** proposed | accepted | rejected | superseded by ADR-NNNN
+**Date:** [YYYY-MM-DD] · **Deciders:** [names]
+
+### Context and Problem Statement
+[The situation and the question to decide, in two or three sentences.]
+
+### Decision Drivers
+- [Driver, e.g. a quality goal or constraint]
+
+### Considered Options
+1. [Option 1]
+2. [Option 2]
+
+### Decision Outcome
+Chosen option: "[option]", because [justification tied to the drivers].
+
+### Consequences
+- Good, because [...]
+- Bad, because [...]
+
+### Confirmation
+[How compliance with this decision is checked.]`,
     },
     "api-spec": {
       title: "API Specification",
@@ -421,7 +447,7 @@ ALTER TABLE ...
 
     {#if previewMode === "preview"}
       <div class="preview-document">
-        <h1 class="doc-title">Architecture Documentation</h1>
+        <h1 class="doc-title">{documentName}</h1>
         {#each sections as section, i (section.id)}
           <div class="preview-section">
             <MarkdownPreview content={`## ${section.title}\n\n${section.content}`} />

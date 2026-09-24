@@ -1,14 +1,11 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { CUSTOM_TEMPLATE, DOCUMENT_TEMPLATES } from "../templates";
 
   let {
     selectedTemplate = "arc42",
     selectedLanguage = "en",
-    sections = [],
-    onTemplateChange = (_t: string) => {},
+    onApplyTemplate = (_id: string) => {},
     onLanguageChange = (_l: string) => {},
-    onSectionsChange = (_s: any[]) => {},
-    beginUpdate = (_review = true) => Object.assign(onSectionsChange, { finish: () => {} }),
   } = $props();
 
   const languages = [
@@ -16,12 +13,10 @@
     { id: "sk", name: "Slovensky", desc: "SK text, EN technical terms" },
   ];
 
-  const templates = [
-    { id: "arc42", name: "arc42", desc: "Pragmatic architecture documentation" },
-    { id: "c4", name: "C4 Model", desc: "Context, Container, Component, Code" },
-    { id: "togaf", name: "TOGAF", desc: "Enterprise architecture framework" },
-    { id: "custom", name: "Custom", desc: "Your own template structure" },
-  ];
+  const templateGroups = (["Architecture", "Design & decisions", "Delivery"] as const).map(group => ({
+    group,
+    templates: [...DOCUMENT_TEMPLATES.filter(t => t.group === group), ...(group === "Design & decisions" ? [CUSTOM_TEMPLATE] : [])],
+  }));
 
   const diagramTypes = [
     { id: "uml-sequence", label: "Sequence", icon: "↕", type: "uml" },
@@ -39,6 +34,7 @@
     { id: "tech-task", label: "Tech Task", icon: "⚙", kind: "task" },
     { id: "bug-report", label: "Bug Report", icon: "⚠", kind: "task" },
     { id: "spike", label: "Spike / Research", icon: "◈", kind: "task" },
+    { id: "adr", label: "Decision (ADR)", icon: "◇", kind: "task" },
     { id: "api-spec", label: "API Spec", icon: "⬡", kind: "task" },
     { id: "db-migration", label: "DB Migration", icon: "▦", kind: "task" },
     { id: "meeting-notes", label: "Meeting Notes", icon: "▤", kind: "task" },
@@ -50,27 +46,6 @@
     e.dataTransfer!.effectAllowed = "copy";
   }
 
-  async function selectTemplate(id: string) {
-    onTemplateChange(id);
-    const commit = beginUpdate(false);
-    if (id !== "custom") {
-      try {
-        const templateSections: string[] = await invoke("get_template", { name: id });
-        commit(templateSections.map(title => ({
-          title,
-          content: "",
-          diagrams: [],
-        })));
-      } catch (err) {
-        console.error("Failed to load template:", err);
-      } finally {
-        commit.finish();
-      }
-    } else {
-      commit([{ title: "Overview", content: "", diagrams: [] }]);
-      commit.finish();
-    }
-  }
 </script>
 
 <aside class="sidebar">
@@ -81,18 +56,22 @@
 
   <div class="section">
     <h3 class="section-title">Template</h3>
-    <div class="template-list">
-      {#each templates as tmpl}
-        <button
-          class="template-item"
-          class:active={selectedTemplate === tmpl.id}
-          onclick={() => selectTemplate(tmpl.id)}
-        >
-          <span class="template-name">{tmpl.name}</span>
-          <span class="template-desc">{tmpl.desc}</span>
-        </button>
-      {/each}
-    </div>
+    <p class="section-hint">Adds the structure; content you wrote is kept.</p>
+    {#each templateGroups as { group, templates } (group)}
+      <h4 class="template-group">{group}</h4>
+      <div class="template-list">
+        {#each templates as tmpl (tmpl.id)}
+          <button
+            class="template-item"
+            class:active={selectedTemplate === tmpl.id}
+            onclick={() => onApplyTemplate(tmpl.id)}
+          >
+            <span class="template-name">{tmpl.name}</span>
+            <span class="template-desc">{tmpl.desc}</span>
+          </button>
+        {/each}
+      </div>
+    {/each}
   </div>
 
   <div class="section">
@@ -147,17 +126,6 @@
     </div>
   </div>
 
-  <div class="section">
-    <h3 class="section-title">Export</h3>
-    <div class="export-buttons">
-      <button class="export-btn" onclick={() => {}}>
-        <span>Visio</span>
-      </button>
-      <button class="export-btn" onclick={() => {}}>
-        <span>Enterprise Architect</span>
-      </button>
-    </div>
-  </div>
 </aside>
 
 <style>
@@ -224,6 +192,7 @@
     background: transparent;
     border-radius: var(--radius);
     color: var(--text-secondary);
+    text-align: left;
     transition: all 0.15s;
   }
 
@@ -293,26 +262,11 @@
     font-weight: 500;
   }
 
-  .export-buttons {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .export-btn {
-    padding: 8px 12px;
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    color: var(--text-secondary);
-    font-size: 12px;
-    font-weight: 500;
-    transition: all 0.15s;
-  }
-
-  .export-btn:hover {
-    border-color: var(--accent);
-    color: var(--text-primary);
+  .template-group {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin: 10px 0 4px;
   }
 
   .task-chip:hover {

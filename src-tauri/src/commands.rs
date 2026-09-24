@@ -158,38 +158,3 @@ pub fn export_to_tool(tool: &str, content: &str) -> Result<String, String> {
         _ => Err(format!("Unknown tool: {}", tool)),
     }
 }
-
-#[tauri::command]
-pub fn get_template(name: &str) -> Result<Vec<String>, String> {
-    let sections = match name {
-        "arc42" => vec![
-            "1. Introduction and Goals",
-            "2. Constraints",
-            "3. Context and Scope",
-            "4. Solution Strategy",
-            "5. Building Block View",
-            "6. Runtime View",
-            "7. Deployment View",
-            "8. Crosscutting Concepts",
-            "9. Architecture Decisions",
-            "10. Quality Requirements",
-            "11. Risks and Technical Debt",
-            "12. Glossary",
-        ],
-        "c4" => vec![
-            "System Context",
-            "Container Diagram",
-            "Component Diagram",
-            "Code / Class Diagram",
-        ],
-        "togaf" => vec![
-            "Architecture Vision",
-            "Business Architecture",
-            "Information Systems Architecture",
-            "Technology Architecture",
-            "Migration Planning",
-        ],
-        _ => vec!["Overview"],
-    };
-    Ok(sections.into_iter().map(String::from).collect())
-}

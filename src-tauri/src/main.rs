@@ -4,9 +4,11 @@ mod ai;
 mod commands;
 mod doc_generator;
 mod ea;
+mod git;
 mod legacy;
 mod project;
 mod python_runtime;
+mod release;
 mod runtime;
 mod renderer;
 mod visio;
@@ -47,11 +49,17 @@ fn main() {
             commands::generate_diagram,
             commands::generate_documentation,
             commands::export_to_tool,
-            commands::get_template,
             project::save_project,
             project::load_project,
             project::list_project_history,
             project::load_project_revision,
+            git::git_list_refs,
+            git::git_log_range,
+            git::git_project_status,
+            git::git_commit_project,
+            git::git_push_project,
+            release::list_release_templates,
+            release::save_release_template,
             legacy::import_legacy_project,
             runtime::open_edit_session,
             runtime::apply_project_edit,

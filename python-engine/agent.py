@@ -369,6 +369,53 @@ TEMPLATE_SECTIONS = {
         "Technology Architecture",
         "Migration Planning",
     ],
+    # Keep in sync with src/lib/templates.ts, which adds per-section guidance.
+    "solution-design": [
+        "Overview",
+        "Business Context and Goals",
+        "Requirements",
+        "Architecture",
+        "Components",
+        "Data Flow",
+        "Integration and APIs",
+        "Data Model",
+        "Security",
+        "Reliability",
+        "Performance Efficiency",
+        "Cost Optimization",
+        "Operational Excellence",
+        "Alternatives Considered",
+        "Risks and Open Questions",
+    ],
+    "adr": [
+        "Status and Metadata",
+        "Context and Problem Statement",
+        "Decision Drivers",
+        "Considered Options",
+        "Decision Outcome",
+        "Consequences",
+        "Pros and Cons of the Options",
+        "Confirmation",
+        "More Information",
+    ],
+    "well-architected": [
+        "Workload Summary",
+        "Reliability",
+        "Security",
+        "Cost Optimization",
+        "Operational Excellence",
+        "Performance Efficiency",
+        "Findings and Recommendations",
+        "Action Plan",
+    ],
+    "release-notes": [
+        "Summary",
+        "New Features",
+        "Improvements",
+        "Bug Fixes",
+        "Breaking Changes and Upgrade Steps",
+        "Known Issues",
+    ],
 }
 
 
@@ -421,6 +468,10 @@ def generate_diagrams(state: AgentState) -> dict:
             "Business Architecture": "activity",
             "Information Systems Architecture": "component",
             "Technology Architecture": "deployment",
+        },
+        "solution-design": {
+            "Architecture": "component",
+            "Data Flow": "sequence",
         },
     }
 

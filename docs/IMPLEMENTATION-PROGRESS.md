@@ -109,6 +109,46 @@ Overenie: 215 Rust testov (vrátane reálneho `curl.exe` proti lokálnemu listen
 
 Otvorené: Docs/Diagram zatiaľ nepoužívajú zvoleného providera. Druhá inštancia ArchGen označí pri štarte bežiace úlohy prvej ako prerušené (chýba single-instance ochrana). Mock IPC v e2e je ručný obraz validácie v Ruste a môže sa rozísť. Review a Git history modal nevracajú fokus na otvárajúci prvok (AI settings áno).
 
+## E1, druhý prírastok — Git, release notes a šablóny pre architektúru
+
+Implementované 2026-09-24. Návod: [GIT-A-RELEASE-NOTES.md](GIT-A-RELEASE-NOTES.md); odporúčania
+ďalších krokov: [ZLEPSENIA.md](ZLEPSENIA.md).
+
+- **Git lišta** (`src-tauri/src/git.rs`, `GitStatusBar.svelte`): stav priečinka projektu (vetva,
+  ↑/↓ voči upstreamu, zmeny iba v priečinku projektu), **Commit…** iba priečinka projektu a iba
+  uloženého obsahu (kontrola odtlačku ako pri ukladaní; inde stagnuté súbory sa nepribalia),
+  **Push** aktuálnej vetvy do jej upstreamu po potvrdení, bez force, s limitom 180 s a bez
+  interaktívnych promptov. Doterajšia zásada „ArchGen sám necommituje" platí ďalej: commit
+  a push sú iba výslovné akcie.
+- **Release notes z Gitu** (`ReleaseNotesDialog.svelte`, `src/lib/release-notes.ts`): tagy
+  a vetvy ľubovoľného repozitára, rozsah commitov (revízie overené cez `rev-parse
+  --end-of-options`, nikdy ako voľba alebo rozsah; filter podpriečinka s literal pathspecs),
+  parser Conventional Commits (typ, scope, `!`, `BREAKING CHANGE`, issues), šablóny v Markdowne
+  s hlavičkou skupín a Mustache podmnožinou, tri vstavané šablóny (Keep a Changelog, technická,
+  zákaznícka SK), projektové šablóny v `templates/release-notes/`. Výsledok sa vloží ako nový
+  dokument alebo navrch aktuálneho (Undo), uloží do súboru alebo skopíruje. Breaking change
+  šablóna nikdy neskryje; zmena rozsahu po načítaní zablokuje vloženie.
+- **Šablóny dokumentov** (`src/lib/templates.ts`): k arc42/C4/TOGAF pribudli Solution Design,
+  Decision Record (ADR, MADR), Well-Architected Review a Release Notes, každá sekcia s krátkym
+  návodom ako HTML komentár. Python engine má rovnaké sekcie (test kontroluje zhodu).
+- **Oprava straty obsahu**: klik na šablónu predtým nahradil všetky sekcie dokumentu prázdnymi.
+  Teraz sa pridá štruktúra, sekcie so zhodným názvom si nechajú obsah a ID, ostatné sekcie
+  s obsahom zostanú za šablónou; zmiznú iba prázdne. Jedna zmena = jeden krok Undo.
+- **Exporty**: Markdown s YAML front matter (title, project, template, language, date) a názvom
+  dokumentu namiesto „ARC42 Architecture Documentation"; HTML cez `marked` + DOMPurify namiesto
+  vlastného regex prevodu, s obsahom a PlantUML diagramami vykreslenými lokálnym rendererom
+  (čo sa vykresliť nedá, zostane ako zdroj a stav to povie). Visio/EA exporty už nehlásia úspech:
+  backend vráti chybu „not implemented", tlačidlá sú neaktívne; neaktívne tlačidlá exportu
+  v bočnom paneli boli odstránené. Náhľad dokumentu má názov dokumentu. Nový blok „Decision (ADR)"
+  medzi Dev Tasks.
+- Odstránený nepoužívaný príkaz `get_template`; test viazaný na Windows API (`share_mode`) je
+  označený `#[cfg(windows)]`, takže sa testy dajú preložiť aj mimo Windows.
+
+Overenie: Rust 204 testov na Linuxe (+6 nových pre Git a šablóny; 7 testov DPAPI/Windows ciest sa
+na Linuxe spustiť nedá, zlyhávajú rovnako ako pred zmenou), 52 JS testov (+13), 55 UI testov
+s mockovaným IPC (+5), 11 Python testov, typová kontrola bez chýb (5 existujúcich CSS warnings).
+Na Windows ani v desktopovej aplikácii s reálnym Tauri IPC tento prírastok zatiaľ overený nebol.
+
 ## Čo ešte nie je dokončené z E0
 
 Nejde o dokončenie celej etapy. Ukladanie je explicitné, bez autosave a automatického otvorenia posledného projektu. História sú Git commity, nie každé uloženie. Neprijaté AI výsledky zostávajú v lokálnom registri, nie v priečinku projektu.
