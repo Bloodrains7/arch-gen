@@ -1,8 +1,33 @@
 import type { Project, ProjectDocument, Section } from "./project";
 
+// The structure a Documentation job asks the model to fill (`templates.ts`
+// `findTemplate`, or the document's current section titles for "custom"/an
+// unknown template — see `generationSections`).
+export interface DocumentationSection {
+  title: string;
+  guidance: string;
+}
+
 export type GenerationRequest =
-  | { kind: "documentation"; description: string; template: string; language: string }
-  | { kind: "diagram"; description: string; diagramType: string; language: string; sectionId: string | null; diagramId: string | null }
+  | {
+      kind: "documentation";
+      description: string;
+      template: string;
+      language: string;
+      sections: DocumentationSection[];
+      provider: string;
+      model: string;
+    }
+  | {
+      kind: "diagram";
+      description: string;
+      diagramType: string;
+      language: string;
+      sectionId: string | null;
+      diagramId: string | null;
+      provider: string;
+      model: string;
+    }
   | {
       kind: "rework";
       instruction: string;

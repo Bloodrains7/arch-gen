@@ -173,11 +173,17 @@ export function installIpcMock(fixtures) {
         const project = sessions.get(args.sessionId);
         const doc = project.documents.find(d => d.id === args.documentId);
         if (doc.revision !== args.expectedDocumentRevision) throw new Error("Document revision conflict");
-        if (args.request.kind === "rework") {
-          const req = args.request;
-          if (req.provider !== aiStatus.provider) {
-            throw new Error("AI settings changed after this request was created. Create the request again.");
-          }
+        const req = args.request;
+        // Documentation and Diagram now go through the configured provider exactly like
+        // Rework (docs/AI-REWORK.md): every kind's own `provider` must match what is
+        // configured, mirroring `create_job_as` (runtime.rs).
+        if (["documentation", "diagram", "rework"].includes(req.kind) && req.provider !== aiStatus.provider) {
+          throw new Error("AI settings changed after this request was created. Create the request again.");
+        }
+        if (req.kind === "documentation" && (!Array.isArray(req.sections) || req.sections.length === 0)) {
+          throw new Error("Choose at least one section to generate.");
+        }
+        if (req.kind === "rework") {
           // Mirrors the scope/target refusals `create_job_as` makes (runtime.rs),
           // so a request that never should have reached the backend (a widened
           // scope, a pruned-away target) fails here exactly like it would there.
@@ -206,8 +212,12 @@ export function installIpcMock(fixtures) {
           if (latest.status !== "running") { resolve(latest); return; }
           let sections;
           if (job.request.kind === "documentation") {
+            // `raw`: `{summary, sections:[{title, content, diagrams}]}` — the AI answer
+            // shape (docs/AI-REWORK.md). The mock does not enforce "use the requested
+            // title, not the model's" itself (that contract is Rust's, covered by its own
+            // unit tests); it keeps whatever title the test supplies.
             sections = raw.sections.map(s => ({ ...s, id: crypto.randomUUID(),
-              diagrams: s.diagrams.map(g => ({ ...g, id: crypto.randomUUID() })) }));
+              diagrams: (s.diagrams ?? []).map(g => ({ ...g, id: crypto.randomUUID() })) }));
           } else if (job.request.kind === "rework") {
             // The mock never computes a merge itself: the test supplies the
             // exact post-merge sections (which ids stayed, which are new), the
@@ -215,15 +225,21 @@ export function installIpcMock(fixtures) {
             sections = raw.sections.map(s => ({ ...s, id: s.id || crypto.randomUUID(),
               diagrams: (s.diagrams ?? []).map(g => ({ ...g, id: g.id || crypto.randomUUID() })) }));
           } else {
+            // `raw`: `{summary, diagram:{format, content}}`. Updating an existing diagram
+            // keeps its id/type/format (only `content` changes); a new one gets the
+            // model's own format, mirroring `merge_diagram`/`diagram_outcome` (runtime.rs).
             sections = clone(job.baseDocument.sections);
             let section = sections.find(s => s.id === job.request.sectionId);
             if (!section) { section = { id: crypto.randomUUID(), title: "Diagram", content: "", diagrams: [] }; sections.push(section); }
-            const existing = section.diagrams.findIndex(g => g.id === job.request.diagramId);
-            const diagram = { ...raw, id: job.request.diagramId ?? crypto.randomUUID() };
-            if (existing < 0) section.diagrams.push(diagram); else section.diagrams[existing] = diagram;
+            const existingIndex = section.diagrams.findIndex(g => g.id === job.request.diagramId);
+            if (existingIndex >= 0) {
+              section.diagrams[existingIndex] = { ...section.diagrams[existingIndex], content: raw.diagram.content };
+            } else {
+              section.diagrams.push({ id: crypto.randomUUID(), diagram_type: job.request.diagramType,
+                format: raw.diagram.format, content: raw.diagram.content });
+            }
           }
-          const summary = job.request.kind === "rework" ? (raw.summary ?? null) : (latest.summary ?? null);
-          resolve(putJob({ ...latest, status: "ready", sections, summary }));
+          resolve(putJob({ ...latest, status: "ready", sections, summary: raw.summary ?? null }));
         }; });
       }
       if (command === "cancel_generation_job" || command === "discard_generation_job") {

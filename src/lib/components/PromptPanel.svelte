@@ -2,8 +2,12 @@
   import type { Section, Diagram } from "../project";
   import type { GenerationRequest } from "../runtime";
   import { emptySelection, selectionSummary } from "../selection";
-  import { buildReworkRequest, consentText, currentProvider, providerChip } from "../ai";
+  import {
+    buildReworkRequest, buildDocumentationRequest, buildDiagramRequest,
+    consentText, generationConsentText, currentProvider, providerChip,
+  } from "../ai";
   import type { AiStatus } from "../ai";
+  import { generationSections } from "../templates";
 
   let {
     sections = [],
@@ -96,17 +100,27 @@
   let isDocsMode = $derived(effectiveMode === "docs");
   let isAutoMode = $derived(effectiveMode === "auto");
   let activeProvider = $derived(aiStatus ? currentProvider(aiStatus) : undefined);
-  let reworkUnavailable = $derived(!aiStatus || !activeProvider || !activeProvider.available);
-  let reworkBlockReason = $derived(
+  // Every mode now runs through the configured provider (Docs/Diagram/Auto exactly like
+  // Rework — the AI settings dialog applies everywhere), so unavailability blocks all four.
+  let aiUnavailable = $derived(!aiStatus || !activeProvider || !activeProvider.available);
+  let blockReason = $derived(
     aiStatusError ? aiStatusError
     : !aiStatus ? ""
     : !activeProvider ? "AI is not configured. Open AI settings to choose a provider."
     : !activeProvider.available ? activeProvider.detail
-    : scope === "none" ? "Tick blocks, or click Rework to rework the whole document."
+    : isReworkMode && scope === "none" ? "Tick blocks, or click Rework to rework the whole document."
     : ""
   );
-  let consent = $derived(aiStatus ? consentText(aiStatus, scope, includeContext) : "");
-  let blocked = $derived(isReworkMode && (reworkUnavailable || scope === "none"));
+  // An explicitly picked "Diagram to update" target, for the consent sentence only — Auto's
+  // own update-vs-new detection is a prompt-time heuristic (see `handleGenerate`) and cannot
+  // be known before Generate is pressed, so the sentence names the possibility, not a guess.
+  let diagramUpdateTarget = $derived(!isReworkMode && targetDiagramId !== "");
+  let consent = $derived(
+    !aiStatus ? ""
+    : isReworkMode ? consentText(aiStatus, scope, includeContext)
+    : generationConsentText(aiStatus, effectiveMode as "auto" | "diagram" | "docs", diagramUpdateTarget)
+  );
+  let blocked = $derived(aiUnavailable || (isReworkMode && scope === "none"));
   let promptPlaceholder = $derived(
     isDiagramMode ? "Describe a diagram... (e.g., 'class diagram for User entity with name, email, role')"
     : isDocsMode ? "Describe your system... (e.g., 'E-commerce platform with microservices and payment gateway')"
@@ -142,6 +156,10 @@
         case "auto":
         case "diagram":
         case "docs": {
+          // Docs/Diagram/Auto now go through the configured provider exactly like
+          // Rework (same block/consent above), so a request can only be built once
+          // one is loaded — mirrors the "rework" case's own check below.
+          if (!aiStatus) throw new Error("AI status is not loaded yet.");
           const intent = mode === "auto" ? detectIntent(instruction) : mode;
           if (intent === "diagram") {
             let diagramType = detectDiagramType(instruction);
@@ -155,22 +173,19 @@
               diagramType = target.diagram_type;
             }
 
-            await onGenerate({
-              kind: "diagram",
-              description: instruction,
-              diagramType: diagramType,
+            await onGenerate(buildDiagramRequest(
+              instruction,
+              diagramType,
               language,
-              sectionId: (target ? source.find(s => s.diagrams.some(d => d.id === target!.id))?.id : source[0]?.id) ?? null,
-              diagramId: target?.id ?? null,
-            });
+              (target ? source.find(s => s.diagrams.some(d => d.id === target!.id))?.id : source[0]?.id) ?? null,
+              target?.id ?? null,
+              aiStatus,
+            ));
           } else {
-            // Generate full documentation
-            await onGenerate({
-              kind: "documentation",
-              description: instruction,
-              template,
-              language,
-            });
+            // Generate full documentation: the requested structure is the chosen
+            // template's own sections, or — for "custom"/an unknown template —
+            // the document's current section titles (`generationSections`).
+            await onGenerate(buildDocumentationRequest(instruction, template, language, generationSections(template, source), aiStatus));
           }
           break;
         }
@@ -217,19 +232,19 @@
       </select>
     </label>
   {/if}
-  {#if isReworkMode}
-    <div class="rework-bar">
+  <div class="rework-bar">
+    {#if isReworkMode}
       <span class="selection-summary">{selectionActive ? selectionSummary(selection) : scope === "document" ? "Whole document" : "Nothing selected"}</span>
       {#if selectionActive}<button type="button" onclick={() => onClearSelection()}>Clear selection</button>{/if}
-      {#if activeProvider}<span class="provider-chip">{providerChip(activeProvider)}</span>{/if}
-      <button type="button" onclick={() => onOpenAiSettings()}>AI settings</button>
-    </div>
-    <p id="rework-consent" class="rework-consent">{consent}</p>
-    {#if scope === "selection"}
-      <label class="include-context"><input type="checkbox" checked={includeContext} onchange={(e) => onIncludeContextChange(e.currentTarget.checked)} /> Include the rest of the document as read-only context</label>
     {/if}
-    {#if reworkBlockReason}<p class="rework-blocked">{reworkBlockReason}</p>{/if}
+    {#if activeProvider}<span class="provider-chip">{providerChip(activeProvider)}</span>{/if}
+    <button type="button" onclick={() => onOpenAiSettings()}>AI settings</button>
+  </div>
+  <p id="rework-consent" class="rework-consent">{consent}</p>
+  {#if isReworkMode && scope === "selection"}
+    <label class="include-context"><input type="checkbox" checked={includeContext} onchange={(e) => onIncludeContextChange(e.currentTarget.checked)} /> Include the rest of the document as read-only context</label>
   {/if}
+  {#if blockReason}<p class="rework-blocked">{blockReason}</p>{/if}
   <div class="prompt-container">
     <textarea
       class="prompt-input"
@@ -242,7 +257,7 @@
       class="generate-btn"
       onclick={handleGenerate}
       disabled={isGenerating || !prompt.trim() || blocked}
-      aria-describedby={isReworkMode ? "rework-consent" : undefined}
+      aria-describedby="rework-consent"
     >
       {#if isGenerating}
         Generating...
@@ -267,7 +282,6 @@
     <span>Enter to generate</span>
     <span>Shift+Enter for new line</span>
     <span>Template: <strong>{selectedTemplate}</strong></span>
-    {#if !isReworkMode}<span>Local Ollama (Python engine)</span>{/if}
   </div>
 </div>
 

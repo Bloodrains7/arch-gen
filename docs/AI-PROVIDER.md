@@ -1,14 +1,23 @@
-# Local AI configuration (E0)
+# Local AI configuration (E0) — Python engine, no longer used for generation
 
-> This page covers the **Python engine** behind the Docs / Diagram / Auto modes only. Reworking
-> selected blocks uses a separate provider layer with its own settings dialog (Ollama, OpenAI,
-> Gemini, Anthropic, Claude/Codex/Gemini CLI): see [AI-REWORK.md](AI-REWORK.md). The variables
-> below do not affect Rework, and the AI settings dialog does not affect Docs / Diagram.
+> **Docs / Diagram / Auto generujú cez rovnaký provider layer ako Rework** (Ollama, OpenAI API,
+> Gemini API, Claude API, Claude/Codex/Gemini CLI, nastavené v dialógu **AI settings**) — pozri
+> [AI-REWORK.md](AI-REWORK.md). Premenné prostredia na tejto stránke a Python engine, ktorý
+> popisujú, generovanie dokumentácie ani diagramov už nepohánia; AI settings sa v Ruste rieši
+> úplne inou vrstvou (`src-tauri/src/ai/`), o ktorej je reč v AI-REWORK.md.
+>
+> Čo z Python engine zostáva: `python-engine/agent.py`, DSPy a jeho testy sú stále v repozitári a
+> `python_runtime::initialize()` (inicializácia PyO3) beží pri štarte portable buildu ako offline
+> kontrola, že bundlovaný Python interpreter a moduly fungujú — nič viac. Príkazy
+> `generate_documentation`/`generate_diagram` v `commands.rs` zostávajú zaregistrované (spätná
+> kompatibilita nástrojov, ktoré by ich volali priamo), ale `run_generation_job` (runtime.rs) ich
+> už nevolá pre žiadnu úlohu.
 
 The Python engine uses local Ollama only. Importing `agent` no longer lists models,
 generates a test prompt, selects another model, or sets a global DSPy LM.
 The bundled LiteLLM price metadata is selected before importing DSPy, avoiding its
-unnecessary remote metadata request. Ollama remains an external prerequisite for AI.
+unnecessary remote metadata request. Ollama remains an external prerequisite for the engine
+itself, even though no ArchGen feature currently drives it.
 
 Set these environment variables **before launching the desktop application**:
 

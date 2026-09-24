@@ -251,9 +251,10 @@
   }
 
   // Provider/model come from the job's own `request`, never from the current
-  // `aiStatus`: a rework job always ran with the provider it was created for.
+  // `aiStatus`: an AI job always ran with the provider it was created for.
+  // Documentation, Diagram and Rework all carry `provider`/`model` now.
   function reworkLabel(request: GenerationRequest): string {
-    return request.kind === "rework" ? ` · ${request.provider}${request.model ? ` (${request.model})` : ""}` : "";
+    return ` · ${request.provider}${request.model ? ` (${request.model})` : ""}`;
   }
 
   function reworkTargets(request: GenerationRequest, baseDocument: ProjectDocument): string {
@@ -316,10 +317,11 @@
       }
     } catch (error) {
       try { await refreshJobs(); } catch { /* Keep the original generation failure. */ }
-      // A rejected rework creation usually means AI settings changed underneath the
-      // request (a different provider configured, a key removed); refresh so the
-      // panel reflects what is actually configured now instead of a stale status.
-      if (request.kind === "rework") await refreshAiStatus();
+      // A rejected creation usually means AI settings changed underneath the request (a
+      // different provider configured, a key removed); refresh so the panel reflects what
+      // is actually configured now instead of a stale status. Every kind goes through the
+      // configured provider now (Documentation and Diagram exactly like Rework).
+      await refreshAiStatus();
       throw error;
     } finally { if (preparing) preparingJobs--; }
   }
@@ -605,6 +607,7 @@
       {isGenerating}
       selectedLanguage={activeTab.language}
       {selection}
+      {aiStatus}
       onSectionsChange={setSections}
       {onGenerate}
       onError={(message: string) => status = message}
@@ -661,9 +664,11 @@
   <Modal title={`Review changes — ${reviewing.target.name}`} onClose={() => reviewingId = null}>
     <p>The proposal replaces this document's sections, including the diagram source shown below. Nothing changes until you accept.</p>
     {#if reviewing.request.kind === "rework"}
-      <p>AI rework of {reworkTargets(reviewing.request, reviewing.baseDocument)} · {reviewing.request.provider}{reviewing.request.model ? ` (${reviewing.request.model})` : ""}</p>
-      {#if reviewing.summary}<p class="job-summary">{reviewing.summary}</p>{/if}
+      <p>AI rework of {reworkTargets(reviewing.request, reviewing.baseDocument)}{reworkLabel(reviewing.request)}</p>
+    {:else}
+      <p>AI {reviewing.request.kind}{reworkLabel(reviewing.request)}</p>
     {/if}
+    {#if reviewing.summary}<p class="job-summary">{reviewing.summary}</p>{/if}
     {#if !reviewCompatible}
       <p class="conflict" role="alert">The original document changed or closed. Acceptance is blocked. Recover as a new document to keep this result.</p>
       <details><summary>Current document source</summary><pre class="current-source">{project.documents.find(d => d.id === reviewing!.target.documentId)?.sections.map(sectionSource).join("\n\n") ?? "Document is no longer open in this project."}</pre></details>

@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   fetchAiStatus, configureAi, setAiKey, fetchOllamaModels, testProvider,
-  buildReworkRequest, currentProvider, consentText, providerChip,
+  buildReworkRequest, buildDocumentationRequest, buildDiagramRequest,
+  currentProvider, consentText, generationConsentText, providerChip,
 } from "../src/lib/ai.ts";
+import { generationSections, findTemplate } from "../src/lib/templates.ts";
 
 const fixture = path => JSON.parse(readFileSync(new URL(`./fixtures/${path}`, import.meta.url)));
 
@@ -140,4 +142,76 @@ test("providerChip shows the model, or falls back to \"default model\" when none
   const withoutModel = { ...withModel, id: "claude_cli", label: "Claude CLI", model: "" };
   assert.equal(providerChip(withModel), "Claude API · claude-opus-5");
   assert.equal(providerChip(withoutModel), "Claude CLI · default model");
+});
+
+// ── Documentation / Diagram through the configured provider ──────────────────
+
+test("buildDocumentationRequest carries the caller's resolved sections and the configured provider/model", () => {
+  const status = fixture("ai-status.json"); // provider "ollama", local, available
+  const sections = generationSections("arc42", []);
+  const request = buildDocumentationRequest("Document the payment system.", "arc42", "en", sections, status);
+  assert.deepEqual(request, {
+    kind: "documentation", description: "Document the payment system.", template: "arc42", language: "en",
+    sections, provider: "ollama", model: "qwen3.8:27b",
+  });
+  assert.equal(sections.length, findTemplate("arc42").sections.length);
+});
+
+test("generationSections uses the named template's own sections, and the document's current titles for custom or an unknown template", () => {
+  assert.deepEqual(generationSections("arc42", []), findTemplate("arc42").sections);
+  assert.deepEqual(
+    generationSections("custom", [{ title: "Intro" }, { title: "Details" }]),
+    [{ title: "Intro", guidance: "" }, { title: "Details", guidance: "" }],
+  );
+  assert.deepEqual(generationSections("custom", []), [{ title: "Overview", guidance: "" }]);
+  assert.deepEqual(generationSections("no-such-template", [{ title: "Kept" }]), [{ title: "Kept", guidance: "" }]);
+  assert.deepEqual(generationSections("no-such-template", []), [{ title: "Overview", guidance: "" }]);
+});
+
+test("buildDiagramRequest carries the configured provider/model and the exact target ids", () => {
+  const status = { ...fixture("ai-status.json"), provider: "anthropic" };
+  const request = buildDiagramRequest("Add a Redis cache.", "class", "en", "section-1", "diagram-1", status);
+  assert.deepEqual(request, {
+    kind: "diagram", description: "Add a Redis cache.", diagramType: "class", language: "en",
+    sectionId: "section-1", diagramId: "diagram-1", provider: "anthropic", model: "claude-opus-5",
+  });
+  const forNew = buildDiagramRequest("Draw it.", "class", "en", null, null, status);
+  assert.equal(forNew.sectionId, null);
+  assert.equal(forNew.diagramId, null);
+});
+
+test("generationConsentText is empty for the local provider in every mode", () => {
+  const status = fixture("ai-status.json");
+  assert.equal(generationConsentText(status, "docs", false), "");
+  assert.equal(generationConsentText(status, "diagram", false), "");
+  assert.equal(generationConsentText(status, "auto", true), "");
+});
+
+test("generationConsentText names the recipient for docs, a new diagram and an updated diagram", () => {
+  const status = { ...fixture("ai-status.json"), provider: "anthropic" };
+  assert.equal(
+    generationConsentText(status, "docs", false),
+    "Sends the description and the template's section titles and guidance to Anthropic via Claude API.",
+  );
+  assert.equal(generationConsentText(status, "diagram", false), "Sends the description to Anthropic via Claude API.");
+  assert.equal(
+    generationConsentText(status, "diagram", true),
+    "Sends the description and the existing diagram's source to Anthropic via Claude API.",
+  );
+  // Auto has not committed to docs-or-diagram yet, so it names both possibilities.
+  const auto = generationConsentText(status, "auto", false);
+  assert.match(auto, /template's section titles and guidance/);
+  assert.match(auto, /Anthropic via Claude API\.$/);
+});
+
+test("generationConsentText appends the provider notice when it has one", () => {
+  const base = fixture("ai-status.json");
+  const status = {
+    ...base, provider: "anthropic",
+    providers: base.providers.map(p => p.id === "anthropic" ? { ...p, notice: "Uses the paid API, billed per request." } : p),
+  };
+  assert.equal(
+    generationConsentText(status, "docs", false),
+    "Sends the description and the template's section titles and guidance to Anthropic via Claude API. Uses the paid API, billed per request.",
+  );
 });

@@ -1,6 +1,6 @@
 //! Durable local editing authority. Project files remain explicit user saves.
 use crate::{
-    ai::{self, rework, Ai, ProviderKind},
+    ai::{self, generate, rework, Ai, ProviderKind},
     commands,
     project::{Diagram, Document, Project, Section},
 };
@@ -41,6 +41,15 @@ pub enum GenerationRequest {
         description: String,
         template: String,
         language: String,
+        // The structure to generate (frontend: `templates.ts` `findTemplate`/the document's
+        // current section titles). `#[serde(default)]` so a job stored by an older version —
+        // before Documentation went through the configured provider — still deserializes.
+        #[serde(default)]
+        sections: Vec<generate::DocSectionRequest>,
+        #[serde(default)]
+        provider: String,
+        #[serde(default)]
+        model: String,
     },
     Diagram {
         description: String,
@@ -51,6 +60,10 @@ pub enum GenerationRequest {
         section_id: Option<String>,
         #[serde(rename = "diagramId")]
         diagram_id: Option<String>,
+        #[serde(default)]
+        provider: String,
+        #[serde(default)]
+        model: String,
     },
     #[serde(rename_all = "camelCase")]
     Rework {
@@ -299,6 +312,7 @@ fn validate_request(doc: &Document, request: &GenerationRequest) -> Result<()> {
             description,
             template,
             language,
+            ..
         } => {
             if template.trim().is_empty() {
                 return Err("Choose a documentation template.".into());
@@ -311,6 +325,7 @@ fn validate_request(doc: &Document, request: &GenerationRequest) -> Result<()> {
             language,
             section_id,
             diagram_id,
+            ..
         } => {
             if diagram_type.trim().is_empty() {
                 return Err("Choose a diagram type.".into());
@@ -363,24 +378,23 @@ pub fn create_generation_job(
     expected_document_revision: u64,
     request: GenerationRequest,
 ) -> Result<Job> {
-    let configured = match &request {
-        GenerationRequest::Rework { .. } => {
-            let route = ai.route()?;
-            Some(Configured { provider: route.kind.id().into(), model: route.model.clone() })
-        }
-        _ => None,
-    };
+    // Documentation and Diagram now go through the configured provider exactly like Rework
+    // (docs/AI-REWORK.md): every request kind needs it resolved once here, from `ai.route()`.
+    let route = ai.route()?;
+    let configured = Configured { provider: route.kind.id().into(), model: route.model.clone() };
     create_job_as(
         &state,
         &session_id,
         &document_id,
         expected_document_revision,
         request,
-        configured.as_ref(),
+        Some(&configured),
     )
 }
-/// A convenience wrapper kept for tests (production always resolves `Configured` first);
-/// gated so it is not flagged as dead code in a non-test build.
+/// A convenience wrapper kept for tests (production always resolves `Configured` first).
+/// Documentation, Diagram and Rework all need one now, so this always supplies the
+/// `request()`/`rework_request()` fixtures' own provider ("ollama") — gated so it is not
+/// flagged as dead code in a non-test build.
 #[cfg(test)]
 fn create_job(
     state: &Runtime,
@@ -389,7 +403,14 @@ fn create_job(
     expected: u64,
     request: GenerationRequest,
 ) -> Result<Job> {
-    create_job_as(state, session, document, expected, request, None)
+    create_job_as(
+        state,
+        session,
+        document,
+        expected,
+        request,
+        Some(&Configured { provider: "ollama".into(), model: "m".into() }),
+    )
 }
 pub(crate) fn create_job_as(
     state: &Runtime,
@@ -469,7 +490,55 @@ pub(crate) fn create_job_as(
                 ));
             }
         } else {
+            // Documentation and Diagram requests are validated the same way Rework's own
+            // provider/model are: reuse `validate_request` for the checks that do not care
+            // about the provider (template/target/description/language), then add the
+            // provider match (refusing the same way a changed setting refuses Rework) and
+            // the extra bounds a rework instruction already has (size limit, Documentation's
+            // requested sections).
             validate_request(doc, &request)?;
+            match &mut request {
+                GenerationRequest::Documentation { description, language, sections, provider, model, .. } => {
+                    let configured = configured.ok_or("AI settings are not available for this request.")?;
+                    if *provider != configured.provider {
+                        return Err("AI settings changed after this request was created. Create the request again.".into());
+                    }
+                    *model = configured.model.clone();
+                    if !rework::valid_instruction(description) {
+                        return Err(format!(
+                            "Enter a description between 1 and {} characters.",
+                            generate::MAX_DESCRIPTION_CHARS
+                        ));
+                    }
+                    if !rework::valid_language(language) {
+                        return Err(format!(
+                            "Language must be between 1 and {} characters, with no control characters.",
+                            rework::MAX_LANGUAGE_CHARS
+                        ));
+                    }
+                    generate::valid_sections(sections)?;
+                }
+                GenerationRequest::Diagram { description, language, provider, model, .. } => {
+                    let configured = configured.ok_or("AI settings are not available for this request.")?;
+                    if *provider != configured.provider {
+                        return Err("AI settings changed after this request was created. Create the request again.".into());
+                    }
+                    *model = configured.model.clone();
+                    if !rework::valid_instruction(description) {
+                        return Err(format!(
+                            "Enter a description between 1 and {} characters.",
+                            generate::MAX_DESCRIPTION_CHARS
+                        ));
+                    }
+                    if !rework::valid_language(language) {
+                        return Err(format!(
+                            "Language must be between 1 and {} characters, with no control characters.",
+                            rework::MAX_LANGUAGE_CHARS
+                        ));
+                    }
+                }
+                GenerationRequest::Rework { .. } => unreachable!("handled above"),
+            }
         }
         let job = Job {
             id: id(),
@@ -618,6 +687,46 @@ pub(crate) fn rework_prompt(job: &Job) -> Result<(String, String, Value)> {
         rework::response_schema(),
     ))
 }
+/// `(system, user, schema)` for a Documentation job's requested structure.
+pub(crate) fn documentation_prompt(job: &Job) -> Result<(String, String, Value)> {
+    let GenerationRequest::Documentation { description, language, sections, .. } = &job.request else {
+        return Err("This job is not a documentation request.".into());
+    };
+    Ok((
+        generate::documentation_system_prompt(language),
+        generate::documentation_user_prompt(
+            &job.base_document.name,
+            &job.base_document.template,
+            language,
+            description,
+            sections,
+        ),
+        generate::documentation_response_schema(sections.len()),
+    ))
+}
+/// `(system, user, schema, existing_format)` for a Diagram job: `existing_format` is `Some`
+/// only when `diagram_id` still resolves to a diagram of the job's base document — the
+/// format `diagram_outcome` must then keep regardless of what the model answers.
+pub(crate) fn diagram_prompt(job: &Job) -> Result<(String, String, Value, Option<String>)> {
+    let GenerationRequest::Diagram { description, diagram_type, language, diagram_id, .. } = &job.request else {
+        return Err("This job is not a diagram request.".into());
+    };
+    let (base_format, existing_content) = diagram_generation_input(&job.base_document, diagram_id.as_deref());
+    let existing = existing_content.as_deref().map(|content| (base_format.as_str(), content));
+    Ok((
+        generate::diagram_system_prompt(language, existing.is_some()),
+        generate::diagram_user_prompt(
+            &job.base_document.name,
+            &job.base_document.template,
+            language,
+            description,
+            diagram_type,
+            existing,
+        ),
+        generate::diagram_response_schema(),
+        existing_content.map(|_| base_format),
+    ))
+}
 /// The provider and model recorded in the job must still resolve identically, or the
 /// request is stale: settings changed underneath it since it was created.
 pub(crate) fn check_route(provider: &str, model: &str, route: &ai::Route) -> Result<()> {
@@ -646,57 +755,69 @@ pub async fn run_generation_job(state: State<'_, Runtime>, ai: State<'_, Ai>, jo
         }
     };
     let output = match &job.request {
-        GenerationRequest::Documentation {
-            description,
-            template,
-            language,
-        } => commands::generate_documentation(
-            description.clone(),
-            template.clone(),
-            language.clone(),
-        )
-        .await
-        .map(|doc| {
-            (
-                doc.sections
-                    .into_iter()
-                    .map(|s| Section {
-                        id: id(),
-                        title: s.title,
-                        content: s.content,
-                        diagrams: s.diagrams.into_iter().map(new_diagram).collect(),
-                    })
-                    .collect(),
-                None,
-            )
-        }),
-        GenerationRequest::Diagram {
-            description,
-            diagram_type,
-            language,
-            section_id,
-            diagram_id,
-        } => {
-            let (output_format, existing) =
-                diagram_generation_input(&job.base_document, diagram_id.as_deref());
-            commands::generate_diagram(
-                description.clone(),
-                diagram_type.clone(),
-                output_format,
-                language.clone(),
-                existing,
-            )
-            .await
-            .map(|result| {
-                (
-                    merge_diagram(
-                        &job.base_document,
-                        section_id.as_deref(),
-                        diagram_id.as_deref(),
-                        result,
-                    ),
-                    None,
-                )
+        GenerationRequest::Documentation { provider, model, sections, .. } => {
+            let prepared = documentation_prompt(&job).and_then(|(system, user, schema)| {
+                let kind = ProviderKind::parse(provider).ok_or_else(|| {
+                    "AI settings changed after this request was created. Create the request again.".to_string()
+                })?;
+                let route = ai.route_for(kind)?;
+                check_route(provider, model, &route)?;
+                Ok((system, user, schema, route))
+            });
+            let requested = sections.clone();
+            let cancel_copy = cancel.clone();
+            match prepared {
+                Ok((system, user, schema, route)) => tokio::task::spawn_blocking(move || {
+                    let answer = ai::complete(
+                        &route,
+                        &ai::Completion {
+                            system: &system, user: &user, schema: &schema,
+                            max_output_tokens: generate::MAX_OUTPUT_TOKENS_DOCUMENTATION, probe: false,
+                        },
+                        &cancel_copy,
+                    );
+                    answer.and_then(|value| generate::documentation_outcome(&requested, &value, &mut || id()))
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("The assistant request stopped unexpectedly: {e}"))),
+                Err(e) => Err(e),
+            }
+            .map(|outcome| (outcome.sections, Some(outcome.summary)))
+        }
+        GenerationRequest::Diagram { provider, model, diagram_type, section_id, diagram_id, .. } => {
+            let prepared = diagram_prompt(&job).and_then(|(system, user, schema, existing_format)| {
+                let kind = ProviderKind::parse(provider).ok_or_else(|| {
+                    "AI settings changed after this request was created. Create the request again.".to_string()
+                })?;
+                let route = ai.route_for(kind)?;
+                check_route(provider, model, &route)?;
+                Ok((system, user, schema, existing_format, route))
+            });
+            let cancel_copy = cancel.clone();
+            let outcome: Result<generate::DiagramOutcome> = match prepared {
+                Ok((system, user, schema, existing_format, route)) => tokio::task::spawn_blocking(move || {
+                    let answer = ai::complete(
+                        &route,
+                        &ai::Completion {
+                            system: &system, user: &user, schema: &schema,
+                            max_output_tokens: generate::MAX_OUTPUT_TOKENS_DIAGRAM, probe: false,
+                        },
+                        &cancel_copy,
+                    );
+                    answer.and_then(|value| generate::diagram_outcome(&value, existing_format.as_deref()))
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("The assistant request stopped unexpectedly: {e}"))),
+                Err(e) => Err(e),
+            };
+            outcome.map(|o| {
+                let sections = merge_diagram(
+                    &job.base_document,
+                    section_id.as_deref(),
+                    diagram_id.as_deref(),
+                    commands::DiagramResult { content: o.content, diagram_type: diagram_type.clone(), format: o.format },
+                );
+                (sections, Some(o.summary))
             })
         }
         GenerationRequest::Rework { provider, model, .. } => {
@@ -856,6 +977,9 @@ mod tests {
             description: "Generate".into(),
             template: "arc42".into(),
             language: "sk".into(),
+            sections: vec![generate::DocSectionRequest { title: "Overview".into(), guidance: String::new() }],
+            provider: "ollama".into(),
+            model: String::new(),
         }
     }
     fn memory() -> Runtime {
@@ -1077,6 +1201,8 @@ mod tests {
             language: "sk".into(),
             section_id: Some("missing".into()),
             diagram_id: Some("diagram".into()),
+            provider: "ollama".into(),
+            model: String::new(),
         };
         assert!(validate_request(&base, &request).is_err());
         let merged = merge_diagram(
@@ -1530,5 +1656,248 @@ mod tests {
         let late = finish_outcome(&state, &job.id, outcome.map(|o| (o.sections, Some(o.summary)))).unwrap();
         assert_eq!(late.status, "cancelled");
         assert!(late.error.is_none());
+    }
+
+    // ── Documentation / Diagram through the configured provider ────────────────
+
+    fn documentation_request(sections: Vec<generate::DocSectionRequest>, provider: &str) -> GenerationRequest {
+        GenerationRequest::Documentation {
+            description: "Describe the payment system.".into(),
+            template: "arc42".into(),
+            language: "en".into(),
+            sections,
+            provider: provider.into(),
+            model: String::new(),
+        }
+    }
+    fn diagram_request(diagram_type: &str, section_id: Option<&str>, diagram_id: Option<&str>, provider: &str) -> GenerationRequest {
+        GenerationRequest::Diagram {
+            description: "Add a Redis cache.".into(),
+            diagram_type: diagram_type.into(),
+            language: "en".into(),
+            section_id: section_id.map(String::from),
+            diagram_id: diagram_id.map(String::from),
+            provider: provider.into(),
+            model: String::new(),
+        }
+    }
+    fn one_section() -> Vec<generate::DocSectionRequest> {
+        vec![generate::DocSectionRequest { title: "Overview".into(), guidance: String::new() }]
+    }
+
+    #[test]
+    fn documentation_requires_a_configured_provider_and_refuses_a_mismatch_at_creation() {
+        let state = memory();
+        let session = open_session(&state, fixture()).unwrap();
+        assert!(create_job_as(&state, &session.session_id, "doc", 0, documentation_request(one_section(), "ollama"), None).is_err());
+        let error = create_job_as(&state, &session.session_id, "doc", 0, documentation_request(one_section(), "openai"), Some(&configured("ollama", "m")))
+            .unwrap_err();
+        assert!(error.contains("changed after this request was created"), "{error}");
+    }
+
+    #[test]
+    fn diagram_requires_a_configured_provider_and_refuses_a_mismatch_at_creation() {
+        let state = memory();
+        let session = open_session(&state, fixture()).unwrap();
+        assert!(create_job_as(&state, &session.session_id, "doc", 0, diagram_request("class", None, None, "ollama"), None).is_err());
+        let error = create_job_as(&state, &session.session_id, "doc", 0, diagram_request("class", None, None, "openai"), Some(&configured("ollama", "m")))
+            .unwrap_err();
+        assert!(error.contains("changed after this request was created"), "{error}");
+    }
+
+    #[test]
+    fn documentation_sections_are_validated_at_creation_and_the_configured_model_is_stored() {
+        let state = memory();
+        let session = open_session(&state, fixture()).unwrap();
+        let error = create_job_as(&state, &session.session_id, "doc", 0, documentation_request(vec![], "ollama"), Some(&configured("ollama", "m")))
+            .unwrap_err();
+        assert!(error.contains("at least one"), "{error}");
+
+        let too_many = (0..generate::MAX_SECTIONS + 1)
+            .map(|i| generate::DocSectionRequest { title: format!("S{i}"), guidance: String::new() })
+            .collect();
+        let error = create_job_as(&state, &session.session_id, "doc", 0, documentation_request(too_many, "ollama"), Some(&configured("ollama", "m")))
+            .unwrap_err();
+        assert!(error.contains("At most 40"), "{error}");
+
+        let blank_title = vec![generate::DocSectionRequest { title: "   ".into(), guidance: String::new() }];
+        let error = create_job_as(&state, &session.session_id, "doc", 0, documentation_request(blank_title, "ollama"), Some(&configured("ollama", "m")))
+            .unwrap_err();
+        assert!(error.contains("needs a title"), "{error}");
+
+        let job = create_job_as(&state, &session.session_id, "doc", 0, documentation_request(one_section(), "ollama"), Some(&configured("ollama", "qwen")))
+            .unwrap();
+        match job.request {
+            GenerationRequest::Documentation { model, .. } => assert_eq!(model, "qwen"),
+            other => panic!("expected a documentation request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_blank_or_oversized_documentation_or_diagram_description_is_refused_at_creation() {
+        let state = memory();
+        let session = open_session(&state, fixture()).unwrap();
+        for description in ["", "   ", &"x".repeat(generate::MAX_DESCRIPTION_CHARS + 1)] {
+            let mut request = documentation_request(one_section(), "ollama");
+            if let GenerationRequest::Documentation { description: d, .. } = &mut request {
+                *d = description.into();
+            }
+            let error = create_job_as(&state, &session.session_id, "doc", 0, request, Some(&configured("ollama", "m"))).unwrap_err();
+            assert!(error.to_lowercase().contains("description"), "{error}");
+
+            let mut request = diagram_request("class", None, None, "ollama");
+            if let GenerationRequest::Diagram { description: d, .. } = &mut request {
+                *d = description.into();
+            }
+            let error = create_job_as(&state, &session.session_id, "doc", 0, request, Some(&configured("ollama", "m"))).unwrap_err();
+            assert!(error.to_lowercase().contains("description"), "{error}");
+        }
+    }
+
+    #[test]
+    fn legacy_documentation_and_diagram_job_json_without_the_new_fields_still_loads() {
+        let old_doc = serde_json::json!({
+            "id": "j1", "projectId": "p", "documentId": "d",
+            "baseDocument": {"id": "d", "name": "Doc", "template": "arc42", "language": "en", "revision": 0, "sections": []},
+            "request": {"kind": "documentation", "description": "x", "template": "arc42", "language": "en"},
+            "status": "ready", "sections": null, "error": null, "createdAt": "now",
+        });
+        match serde_json::from_value::<Job>(old_doc).unwrap().request {
+            GenerationRequest::Documentation { sections, provider, model, .. } => {
+                assert!(sections.is_empty());
+                assert_eq!(provider, "");
+                assert_eq!(model, "");
+            }
+            other => panic!("expected a documentation request, got {other:?}"),
+        }
+        let old_diagram = serde_json::json!({
+            "id": "j2", "projectId": "p", "documentId": "d",
+            "baseDocument": {"id": "d", "name": "Doc", "template": "arc42", "language": "en", "revision": 0, "sections": []},
+            "request": {"kind": "diagram", "description": "x", "diagramType": "class", "language": "en", "sectionId": null, "diagramId": null},
+            "status": "ready", "sections": null, "error": null, "createdAt": "now",
+        });
+        match serde_json::from_value::<Job>(old_diagram).unwrap().request {
+            GenerationRequest::Diagram { provider, model, .. } => {
+                assert_eq!(provider, "");
+                assert_eq!(model, "");
+            }
+            other => panic!("expected a diagram request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_provider_on_a_documentation_or_diagram_job_fails_at_run_instead_of_falling_back_silently() {
+        // A job stored by a version before `provider` existed loads with `provider: ""`
+        // (`#[serde(default)]`, see the legacy-JSON test above). This reproduces exactly the
+        // first step `run_generation_job` takes for these two request kinds — parsing the
+        // job's own stored `provider` before ever calling `ai.route_for` — without Tauri
+        // `State`, and asserts the same message `check_route` uses, never a silent fallback
+        // to the Python engine or any other provider.
+        const STALE: &str = "AI settings changed after this request was created. Create the request again.";
+        let old_doc = serde_json::json!({
+            "id": "j1", "projectId": "p", "documentId": "d",
+            "baseDocument": {"id": "d", "name": "Doc", "template": "arc42", "language": "en", "revision": 0, "sections": []},
+            "request": {"kind": "documentation", "description": "x", "template": "arc42", "language": "en"},
+            "status": "running", "sections": null, "error": null, "createdAt": "now",
+        });
+        let GenerationRequest::Documentation { provider, .. } = serde_json::from_value::<Job>(old_doc).unwrap().request else {
+            unreachable!()
+        };
+        let error = ProviderKind::parse(&provider).ok_or_else(|| STALE.to_string());
+        assert_eq!(error.unwrap_err(), STALE);
+
+        let old_diagram = serde_json::json!({
+            "id": "j2", "projectId": "p", "documentId": "d",
+            "baseDocument": {"id": "d", "name": "Doc", "template": "arc42", "language": "en", "revision": 0, "sections": []},
+            "request": {"kind": "diagram", "description": "x", "diagramType": "class", "language": "en", "sectionId": null, "diagramId": null},
+            "status": "running", "sections": null, "error": null, "createdAt": "now",
+        });
+        let GenerationRequest::Diagram { provider, .. } = serde_json::from_value::<Job>(old_diagram).unwrap().request else {
+            unreachable!()
+        };
+        let error = ProviderKind::parse(&provider).ok_or_else(|| STALE.to_string());
+        assert_eq!(error.unwrap_err(), STALE);
+    }
+
+    #[test]
+    fn documentation_whole_path_replaces_sections_with_the_requested_titles_and_fresh_ids() {
+        let state = memory();
+        let session = open_session(&state, fixture()).unwrap();
+        let sections = vec![
+            generate::DocSectionRequest { title: "Overview".into(), guidance: "What it does.".into() },
+            generate::DocSectionRequest { title: "Data".into(), guidance: "The data model.".into() },
+        ];
+        let job = create_job_as(&state, &session.session_id, "doc", 0, documentation_request(sections, "ollama"), Some(&configured("ollama", "qwen")))
+            .unwrap();
+        let job = transition(&state, &job.id, &["queued"], "running").unwrap();
+
+        let (_system, user, schema) = documentation_prompt(&job).unwrap();
+        assert!(user.contains("Overview") && user.contains("What it does."), "the requested structure is sent");
+        assert_eq!(schema["properties"]["sections"]["minItems"], serde_json::json!(2));
+
+        let answer = serde_json::json!({
+            "summary": "Wrote the overview and data sections.",
+            "sections": [
+                {"title": "ignored: the model's own title never survives", "content": "Overview content.", "diagrams": []},
+                {"title": "ignored too", "content": "Data content.", "diagrams": [
+                    {"diagram_type": "erd", "format": "plantuml", "content": "@startuml\nA\n@enduml"},
+                ]},
+            ],
+        });
+        let GenerationRequest::Documentation { sections, .. } = &job.request else { unreachable!() };
+        let outcome = generate::documentation_outcome(sections, &answer, &mut || id()).unwrap();
+        let finished = finish_outcome(&state, &job.id, Ok((outcome.sections, Some(outcome.summary)))).unwrap();
+        assert_eq!(finished.status, "ready");
+        let result_sections = finished.sections.unwrap();
+        assert_eq!(result_sections[0].title, "Overview", "the requested title survives, not the model's");
+        assert_eq!(result_sections[1].title, "Data");
+        assert_ne!(result_sections[0].id, "section", "a fresh id is minted, never the base document's");
+        assert_ne!(result_sections[0].id, result_sections[1].id);
+        assert!(!result_sections[1].diagrams[0].id.is_empty());
+
+        let project = consume(&state, &session.session_id, &finished.id, 0, false).unwrap();
+        assert_eq!(project.documents[0].sections.len(), 2, "documentation replaces the whole section list");
+        assert_eq!(project.documents[0].sections[0].content, "Overview content.");
+    }
+
+    #[test]
+    fn diagram_whole_path_updates_only_the_target_keeps_its_format_and_leaves_every_other_block_byte_identical() {
+        let state = memory();
+        let session = open_session(&state, two_section_fixture()).unwrap();
+        let job = create_job_as(
+            &state, &session.session_id, "doc", 0,
+            diagram_request("class", Some("section"), Some("diagram"), "ollama"),
+            Some(&configured("ollama", "m")),
+        )
+        .unwrap();
+        let job = transition(&state, &job.id, &["queued"], "running").unwrap();
+
+        let (_system, user, _schema, existing_format) = diagram_prompt(&job).unwrap();
+        assert_eq!(existing_format.as_deref(), Some("plantuml"));
+        assert!(user.contains("old"), "the existing diagram source is sent as reference");
+
+        // The model answers with a different format ("mermaid"); the contract keeps the
+        // existing diagram's own format regardless, so this must not fail the job.
+        let answer = serde_json::json!({
+            "summary": "Added Redis.",
+            "diagram": {"format": "mermaid", "content": "@startuml\nA -> Redis\n@enduml"},
+        });
+        let outcome = generate::diagram_outcome(&answer, existing_format.as_deref()).unwrap();
+        assert_eq!(outcome.format, "plantuml", "the existing format is kept, not the model's mermaid");
+        let GenerationRequest::Diagram { diagram_type, section_id, diagram_id, .. } = &job.request else { unreachable!() };
+        let sections = merge_diagram(
+            &job.base_document,
+            section_id.as_deref(),
+            diagram_id.as_deref(),
+            commands::DiagramResult { content: outcome.content.clone(), diagram_type: diagram_type.clone(), format: outcome.format },
+        );
+        assert_eq!(sections[0].diagrams[0].id, "diagram", "the diagram keeps its id");
+        assert_eq!(sections[0].diagrams[0].diagram_type, "class", "and its type");
+        assert_eq!(sections[0].diagrams[0].format, "plantuml");
+        assert_eq!(sections[0].diagrams[0].content, "@startuml\nA -> Redis\n@enduml");
+        assert_eq!(sections[1], job.base_document.sections[1], "the untouched section is byte-identical");
+
+        let finished = finish_outcome(&state, &job.id, Ok((sections, Some(outcome.summary)))).unwrap();
+        assert_eq!(finished.status, "ready");
     }
 }

@@ -5,6 +5,9 @@
   import type { Section } from "../project";
   import type { GenerationRequest } from "../runtime";
   import { isSectionSelected, isDiagramSelected, emptySelection } from "../selection";
+  import { buildDiagramRequest, currentProvider } from "../ai";
+  import type { AiStatus } from "../ai";
+  import { confirm } from "@tauri-apps/plugin-dialog";
 
   let {
     sections = [],
@@ -12,12 +15,26 @@
     isGenerating,
     selectedLanguage = "en",
     selection = emptySelection(),
+    aiStatus = null as AiStatus | null,
     onSectionsChange = (_s: any[], _group?: string) => {},
     onGenerate = async (_request: GenerationRequest) => {},
     onError = (_message: string) => {},
     onToggleSection = (_id: string) => {},
     onToggleDiagram = (_sectionId: string, _diagramId: string) => {},
   } = $props();
+
+  // Dropping a diagram chip sends its description straight to `onGenerate`, with no
+  // instruction panel in between to show the consent sentence — so this is where that
+  // consent actually has to be asked, before anything reaches a non-local provider. The
+  // local provider needs no dialog (nothing leaves this computer).
+  async function consentToSendDiagram(description: string): Promise<boolean> {
+    const provider = aiStatus ? currentProvider(aiStatus) : undefined;
+    if (!provider || provider.local) return true;
+    return await confirm(
+      `Sends "${description}" as the diagram description, with the document name and template, to ${provider.recipient} via ${provider.label}. Continue?`,
+      { title: "Send to AI provider", kind: "warning" },
+    );
+  }
   let dragOverIndex: number | null = $state(null);
   let previewMode: "edit" | "preview" | "split" = $state("edit");
   let sectionMode: Record<number, "edit" | "preview"> = $state({});
@@ -341,15 +358,17 @@ ALTER TABLE ...
     }
 
     // Handle diagram drops
+    if (!aiStatus) { onError("AI status is not loaded yet."); return; }
+    if (!(await consentToSendDiagram(sections[sectionIndex].title))) return;
     const source: Section[] = JSON.parse(JSON.stringify(sections));
     try {
-      await onGenerate({
-        kind: "diagram",
-        description: source[sectionIndex].title,
-        diagramType: item.id?.startsWith("uml-") ? item.id.slice(4) : item.id?.startsWith("c4-") ? item.id.replace("c4-", "c4_") : item.type,
-        language: selectedLanguage,
-        sectionId: source[sectionIndex].id ?? null, diagramId: null,
-      });
+      await onGenerate(buildDiagramRequest(
+        source[sectionIndex].title,
+        item.id?.startsWith("uml-") ? item.id.slice(4) : item.id?.startsWith("c4-") ? item.id.replace("c4-", "c4_") : item.type,
+        selectedLanguage,
+        source[sectionIndex].id ?? null, null,
+        aiStatus,
+      ));
     } catch (err) {
       onError(`Failed to generate diagram: ${err}`);
       console.error("Failed to generate diagram:", err);
@@ -382,14 +401,16 @@ ALTER TABLE ...
         onSectionsChange([{ title: template.title, content: template.content, diagrams: [] }]);
       }
     } else {
+      if (!aiStatus) { onError("AI status is not loaded yet."); return; }
+      if (!(await consentToSendDiagram(item.label))) return;
       try {
-        await onGenerate({
-          kind: "diagram",
-          description: item.label,
-          diagramType: item.id?.startsWith("uml-") ? item.id.slice(4) : item.id?.startsWith("c4-") ? item.id.replace("c4-", "c4_") : item.type,
-          language: selectedLanguage,
-          sectionId: null, diagramId: null,
-        });
+        await onGenerate(buildDiagramRequest(
+          item.label,
+          item.id?.startsWith("uml-") ? item.id.slice(4) : item.id?.startsWith("c4-") ? item.id.replace("c4-", "c4_") : item.type,
+          selectedLanguage,
+          null, null,
+          aiStatus,
+        ));
       } catch (err) {
         onError(`Failed to generate diagram: ${err}`);
         console.error("Failed to generate diagram:", err);

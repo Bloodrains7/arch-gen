@@ -125,6 +125,21 @@ export function findTemplate(id: string): DocumentTemplate | undefined {
   return id === "custom" ? CUSTOM_TEMPLATE : DOCUMENT_TEMPLATES.find(t => t.id === id);
 }
 
+/**
+ * The section structure a Documentation generation request asks the model to fill: a known,
+ * non-custom template's own sections (with their guidance), or — for "custom" and any
+ * template this list does not know — the document's current section titles (no guidance,
+ * since there is no template to supply one), falling back to a single "Overview" when the
+ * document has none yet. Never `findTemplate("custom")`'s own single "Overview": a document
+ * already built out under "custom" keeps asking for its own structure, not that placeholder.
+ */
+export function generationSections(template: string, currentSections: { title: string }[]): TemplateSection[] {
+  const known = template === "custom" ? undefined : findTemplate(template);
+  if (known) return known.sections;
+  const titles = currentSections.map(s => s.title);
+  return (titles.length ? titles : ["Overview"]).map(title => ({ title, guidance: "" }));
+}
+
 const guidanceComment = (guidance: string) => (guidance ? `<!-- ${guidance.replace(/--+>?/g, "–")} -->` : "");
 
 /** A section counts as empty when it holds nothing but guidance comments. */
